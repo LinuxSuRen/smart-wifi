@@ -1,0 +1,658 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Smart WiFi Manager</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+  background:#0f172a;color:#e2e8f0;min-height:100vh}
+.container{max-width:1200px;margin:0 auto;padding:20px}
+h1{text-align:center;margin-bottom:8px;font-size:1.6rem;color:#f1f5f9}
+.subtitle{text-align:center;color:#94a3b8;margin-bottom:24px;font-size:.85rem}
+
+.card{background:#1e293b;border-radius:12px;padding:20px;margin-bottom:16px;
+  border:1px solid #334155}
+.card h2{font-size:1.1rem;margin-bottom:12px;color:#e2e8f0;
+  border-bottom:1px solid #334155;padding-bottom:8px}
+
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+
+.stat{display:flex;justify-content:space-between;padding:6px 0;
+  border-bottom:1px solid #1e293b}
+.stat label{color:#94a3b8;font-size:.85rem}
+.stat span{font-weight:600;font-size:.85rem}
+
+.badge{display:inline-block;padding:2px 10px;border-radius:20px;
+  font-size:.75rem;font-weight:600}
+.badge-green{background:#065f46;color:#6ee7b7}
+.badge-red{background:#7f1d1d;color:#fca5a5}
+.badge-blue{background:#1e3a5f;color:#93c5fd}
+.badge-yellow{background:#78350f;color:#fcd34d}
+
+.btn{padding:8px 20px;border:none;border-radius:8px;cursor:pointer;
+  font-size:.85rem;font-weight:600;transition:all .2s}
+.btn-primary{background:#3b82f6;color:#fff}
+.btn-primary:hover{background:#2563eb}
+.btn-danger{background:#ef4444;color:#fff}
+.btn-danger:hover{background:#dc2626}
+.btn-success{background:#22c55e;color:#fff}
+.btn-success:hover{background:#16a34a}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+
+input,select{width:100%;padding:8px 12px;border-radius:8px;border:1px solid #475569;
+  background:#0f172a;color:#e2e8f0;font-size:.85rem}
+input:focus,select:focus{outline:none;border-color:#3b82f6}
+.form-group{margin-bottom:12px}
+.form-group label{display:block;margin-bottom:4px;font-size:.8rem;color:#94a3b8}
+
+.network-list{max-height:360px;overflow-y:auto}
+.network-item{display:flex;align-items:center;justify-content:space-between;
+  padding:10px 0;border-bottom:1px solid #1e293b;cursor:pointer;
+  transition:background .15s}
+.network-item:hover{background:#1e3b5f}
+.network-item .info{flex:1;min-width:0}
+.network-item .ssid{font-weight:600;font-size:.9rem}
+.network-item .meta{font-size:.75rem;color:#94a3b8;margin-top:2px}
+.network-item .signal{display:flex;align-items:center;gap:4px;margin:0 12px;
+  font-size:.8rem}
+.signal-dot{width:8px;height:8px;border-radius:50%}
+.signal-4{background:#22c55e}.signal-3{background:#84cc16}
+.signal-2{background:#f59e0b}.signal-1{background:#ef4444}
+
+.toast{position:fixed;top:16px;right:16px;padding:12px 20px;border-radius:8px;
+  color:#fff;font-size:.85rem;z-index:999;opacity:0;transition:opacity .3s;
+  pointer-events:none}
+.toast.show{opacity:1}
+.toast-ok{background:#065f46}
+.toast-err{background:#7f1d1d}
+
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);
+  display:flex;align-items:center;justify-content:center;z-index:100}
+.modal{background:#1e293b;border-radius:12px;padding:24px;width:400px;
+  max-width:90vw;border:1px solid #334155}
+.modal h3{margin-bottom:16px}
+.modal .actions{display:flex;gap:8px;justify-content:flex-end;margin-top:16px}
+
+.tabs{display:flex;gap:8px;margin-bottom:16px}
+.tab{padding:6px 16px;border-radius:8px;cursor:pointer;
+  background:#0f172a;color:#94a3b8;font-size:.85rem;border:1px solid #334155}
+.tab.active{background:#3b82f6;color:#fff;border-color:#3b82f6}
+
+.spinner{display:inline-block;width:14px;height:14px;border:2px solid #334155;
+  border-top-color:#3b82f6;border-radius:50%;animation:spin .6s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+@media(max-width:640px){.grid2{grid-template-columns:1fr}.grid3{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>Smart WiFi Manager</h1>
+  <p class="subtitle" id="sysSubtitle">Loading...</p>
+
+  <div class="card">
+    <h2 style="display:flex;justify-content:space-between;align-items:center">
+      System Status
+      <span id="depsBadge"></span>
+    </h2>
+    <div id="statusContent">Loading...</div>
+  </div>
+
+  <div class="card">
+    <h2 style="display:flex;justify-content:space-between;align-items:center">
+      Interface Capabilities
+    </h2>
+    <div id="capsContent">Loading...</div>
+  </div>
+
+  <div id="depsPanel" class="card" style="display:none"></div>
+
+  <div class="tabs">
+    <button class="tab active" id="tabStation">WiFi Client</button>
+    <button class="tab" id="tabAp">Hotspot / AP</button>
+    <button class="tab" id="tabClients">Clients</button>
+    <button class="tab" id="tabInterfaces">Interfaces</button>
+    <button class="tab" id="tabConfig">Settings</button>
+  </div>
+
+  <div id="panelStation">
+    <div class="card">
+      <h2 style="display:flex;justify-content:space-between;align-items:center">
+        Available Networks
+        <button class="btn btn-primary btn-sm" onclick="scanNetworks()" id="btnScan">🔄 Scan</button>
+      </h2>
+      <div id="networkList" class="network-list">Click Scan to discover networks</div>
+    </div>
+  </div>
+
+  <div id="panelAp" style="display:none">
+    <div class="card">
+      <h2>Start Hotspot</h2>
+      <form id="apForm" onsubmit="startAp(event)">
+        <div class="grid2">
+          <div class="form-group">
+            <label>Mode</label>
+            <select id="apMode">
+              <option value="dual">AP + WiFi (dual-mode, scan while AP running)</option>
+              <option value="ap">AP Only (dedicated, cannot scan)</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>SSID</label>
+             <input type="text" id="apSsid" placeholder="SmartWiFi-AP" required>
+          </div>
+          <div class="form-group">
+            <label>Password (min 8 chars, empty = open)</label>
+            <input type="text" id="apPassword" placeholder="smartwifi123">
+          </div>
+          <div class="form-group">
+            <label>Channel</label>
+            <select id="apChannel">
+              <option value="1">1 (2.412 GHz)</option>
+              <option value="6" selected>6 (2.437 GHz)</option>
+              <option value="11">11 (2.462 GHz)</option>
+              <option value="36">36 (5.18 GHz)</option>
+              <option value="40">40 (5.20 GHz)</option>
+              <option value="44">44 (5.22 GHz)</option>
+              <option value="149">149 (5.745 GHz)</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Captive Portal URL (optional, redirect clients after connecting)</label>
+            <input type="text" id="apCaptiveUrl" placeholder="http://example.com">
+          </div>
+          <div class="form-group">
+            <label>DHCP Range (optional, default 192.168.4.2-100)</label>
+            <div style="display:flex;gap:8px">
+              <input type="text" id="apDhcpStart" placeholder="192.168.4.2" style="width:50%">
+              <input type="text" id="apDhcpEnd" placeholder="192.168.4.100" style="width:50%">
+            </div>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:8px">
+          <button type="submit" class="btn btn-success" id="btnStartAp">Start AP</button>
+          <button type="button" class="btn btn-danger" onclick="stopAp()" id="btnStopAp">Stop AP</button>
+          <button type="button" class="btn" style="background:#64748b;color:#fff" onclick="resetWireless()" id="btnReset">🔄 Reset WiFi</button>
+        </div>
+      </form>
+      <div id="apStatus" style="margin-top:12px;font-size:.85rem"></div>
+    </div>
+  </div>
+
+  <div id="panelClients" style="display:none">
+    <div class="card">
+      <h2 style="display:flex;justify-content:space-between;align-items:center">
+        Connected Clients
+        <button class="btn btn-primary btn-sm" onclick="loadClients()" id="btnRefreshClients">🔄 Refresh</button>
+      </h2>
+      <div id="clientsContent" style="font-size:.85rem;color:#94a3b8">Start the AP to see connected devices</div>
+    </div>
+  </div>
+
+  <div id="panelInterfaces" style="display:none">
+    <div class="card">
+      <h2 style="display:flex;justify-content:space-between;align-items:center">
+        Network Interfaces
+        <button class="btn btn-primary btn-sm" onclick="loadInterfaces()" id="btnRefreshIfaces">🔄 Refresh</button>
+      </h2>
+      <div id="interfacesContent">Loading...</div>
+    </div>
+  </div>
+
+  <div id="panelConfig" style="display:none">
+    <div class="card">
+      <h2>Configuration</h2>
+      <div id="configContent">Loading...</div>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<div class="modal-overlay" id="connectModal" style="display:none">
+  <div class="modal">
+    <h3>Connect to WiFi</h3>
+    <form onsubmit="connectToWifi(event)">
+      <div class="form-group">
+        <label>SSID</label>
+        <input type="text" id="connectSsid" readonly>
+      </div>
+      <div class="form-group">
+        <label>Password</label>
+        <input type="password" id="connectPassword" placeholder="WiFi password" autofocus>
+      </div>
+      <div class="actions">
+        <button type="button" class="btn" onclick="closeModal()">Cancel</button>
+        <button type="submit" class="btn btn-primary">Connect</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<script>
+const API = '/api';
+
+function showToast(msg, ok) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = 'toast toast-' + (ok ? 'ok' : 'err') + ' show';
+  setTimeout(() => t.className = 'toast', 3000);
+}
+
+async function fetchJSON(url, opts) {
+  const r = await fetch(url, opts);
+  return r.json();
+}
+
+// --- Status ---
+async function loadStatus() {
+  try {
+    const data = await fetchJSON(API + '/status');
+    const s = data.status;
+    document.getElementById('sysSubtitle').textContent =
+      'Interface: ' + (s.interface || 'N/A') + ' | Mode: ' + s.mode;
+    document.getElementById('statusContent').innerHTML =
+      '<div class="grid3">' +
+      stat('Interface', s.interface || 'N/A') +
+      stat('Mode', s.mode) +
+      stat('Connected SSID', s.connected_ssid || '-') +
+      stat('IP Address', s.ip_address || '-') +
+      stat('AP Active', s.ap_active ? '✅ ' + s.ap_ssid : '❌ Inactive') +
+      stat('AP Clients', s.ap_clients) +
+      '</div>';
+
+    const c = data.capabilities;
+    if (c) {
+      document.getElementById('capsContent').innerHTML =
+        '<div class="grid2">' +
+        stat('Interface', c.interface || '-') +
+        stat('Driver', c.driver || '-') +
+        stat('Chipset', c.chipset || '-') +
+        stat('AP Mode', c.supports_ap ? badge('Supported', 'green') : badge('No', 'red')) +
+        stat('Station Mode', c.supports_station ? badge('Supported', 'green') : badge('No', 'red')) +
+        stat('Dual Mode', c.supports_dual ? badge('Yes', 'blue') + ' ' + c.dual_mode_reason : badge('No', 'red') + ' ' + c.dual_mode_reason) +
+        '</div>';
+    } else {
+      document.getElementById('capsContent').innerHTML = badge('No wireless interface detected', 'red');
+    }
+  } catch(e) {
+    document.getElementById('statusContent').innerHTML = 'Error loading status';
+  }
+}
+
+function stat(label, value) {
+  return '<div class="stat"><label>' + label + '</label><span>' + value + '</span></div>';
+}
+function badge(text, color) {
+  return '<span class="badge badge-' + color + '">' + text + '</span>';
+}
+
+// --- Scan ---
+async function scanNetworks() {
+  const btn = document.getElementById('btnScan');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Scanning...';
+  try {
+    const data = await fetchJSON(API + '/scan');
+    const list = document.getElementById('networkList');
+    if (data.error) {
+      list.innerHTML = '<p style="color:#fca5a5;padding:12px">' + escapeHtml(data.error) + '</p>';
+      return;
+    }
+    if (!data.networks || data.networks.length === 0) {
+      list.innerHTML = '<p style="color:#94a3b8;padding:12px">No networks found</p>';
+      return;
+    }
+    list.innerHTML = data.networks.map(n => {
+      const sig = n.signal > -50 ? 4 : n.signal > -65 ? 3 : n.signal > -75 ? 2 : 1;
+      const lock = n.security !== 'Open' ? ' 🔒' : '';
+      return '<div class="network-item" onclick="openConnectModal(\'' +
+        escapeHtml(n.ssid) + '\', \'' + n.security + '\')">' +
+        '<div class="info"><div class="ssid">' + escapeHtml(n.ssid) + lock + '</div>' +
+        '<div class="meta">' + n.security + ' | Ch ' + n.channel + ' | ' + n.bssid + '</div></div>' +
+        '<div class="signal">' + n.signal + ' dBm' +
+        '<span class="signal-dot signal-' + sig + '"></span></div>' +
+        '</div>';
+    }).join('');
+  } catch(e) {
+    showToast('Scan failed', false);
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '🔄 Scan';
+  }
+}
+
+function escapeHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+// --- Connect ---
+function openConnectModal(ssid, security) {
+  document.getElementById('connectSsid').value = ssid;
+  document.getElementById('connectPassword').value = '';
+  document.getElementById('connectPassword').style.display = security === 'Open' ? 'none' : 'block';
+  document.getElementById('connectModal').style.display = 'flex';
+  if (security === 'Open') document.getElementById('connectPassword').parentElement.querySelector('label').style.display = 'none';
+  else document.getElementById('connectPassword').parentElement.querySelector('label').style.display = 'block';
+  document.getElementById('connectPassword').focus();
+}
+function closeModal() {
+  document.getElementById('connectModal').style.display = 'none';
+  document.getElementById('connectPassword').parentElement.querySelector('label').style.display = 'block';
+  document.getElementById('connectPassword').style.display = 'block';
+}
+async function connectToWifi(e) {
+  e.preventDefault();
+  const ssid = document.getElementById('connectSsid').value;
+  const pwd = document.getElementById('connectPassword').value;
+  closeModal();
+  const data = await fetchJSON(API + '/connect', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ssid, password: pwd})
+  });
+  showToast(data.message, data.ok);
+  if (data.ok) setTimeout(loadStatus, 2000);
+}
+
+// --- AP ---
+async function loadApState() {
+  try {
+    var data = await fetchJSON(API + '/ap/saved');
+    document.getElementById('apMode').value = 'dual';
+    document.getElementById('apSsid').value = data.ssid || '';
+    document.getElementById('apPassword').value = data.password || '';
+    document.getElementById('apChannel').value = String(data.channel || '6');
+    document.getElementById('apCaptiveUrl').value = data.captive_portal_url || '';
+    document.getElementById('apDhcpStart').value = data.dhcp_start || '';
+    document.getElementById('apDhcpEnd').value = data.dhcp_end || '';
+  } catch(e) {}
+}
+
+async function startAp(e) {
+  e.preventDefault();
+  const ssid = document.getElementById('apSsid').value;
+  const pwd = document.getElementById('apPassword').value;
+  const ch = parseInt(document.getElementById('apChannel').value);
+  const captive = document.getElementById('apCaptiveUrl').value.trim();
+  const dhcpStart = document.getElementById('apDhcpStart').value.trim();
+  const dhcpEnd = document.getElementById('apDhcpEnd').value.trim();
+  const dual = document.getElementById('apMode').value === 'dual';
+  // Save settings before starting AP
+  var configData = {};
+  if (captive) configData.captive_portal_url = captive;
+  if (dhcpStart) configData.dhcp_start = dhcpStart;
+  if (dhcpEnd) configData.dhcp_end = dhcpEnd;
+  if (Object.keys(configData).length > 0) {
+    await fetchJSON(API + '/config', {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(configData)
+    });
+  }
+  const data = await fetchJSON(API + '/ap/start', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ssid, password: pwd, channel: ch, dual: dual})
+  });
+  showToast(data.message, data.ok);
+  if (data.ok) setTimeout(loadStatus, 1500);
+}
+async function stopAp() {
+  const data = await fetchJSON(API + '/ap/stop', {method: 'POST'});
+  showToast(data.message, data.ok);
+  if (data.ok) setTimeout(loadStatus, 1500);
+}
+
+async function resetWireless() {
+  const btn = document.getElementById('btnReset');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Resetting...';
+  try {
+    // Stop AP first
+    await fetchJSON(API + '/ap/stop', {method: 'POST'});
+    // Reset wireless interfaces
+    const data = await fetchJSON(API + '/reset', {method: 'POST'});
+    showToast(data.message, data.ok);
+    setTimeout(loadStatus, 1500);
+  } catch(e) {
+    showToast('Reset failed', false);
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '🔄 Reset WiFi';
+  }
+}
+
+// --- Config ---
+async function loadConfig() {
+  const data = await fetchJSON(API + '/config');
+  document.getElementById('configContent').innerHTML =
+    stat('AP SSID', data.ap_ssid) +
+    stat('AP Password', data.ap_password) +
+    stat('AP Channel', data.ap_channel) +
+     stat('AP IP', data.ap_ip) +
+     stat('AP Netmask', data.ap_netmask) +
+     stat('WiFi Interface', data.wifi_interface) +
+     stat('Captive Portal URL', data.captive_portal_url || '-');
+}
+
+// --- Tabs ---
+document.getElementById('tabStation').onclick = function() {
+  switchTab('station');
+};
+document.getElementById('tabAp').onclick = function() {
+  switchTab('ap');
+  loadApState();
+  loadStatus();
+};
+document.getElementById('tabClients').onclick = function() {
+  switchTab('clients');
+  loadClients();
+};
+document.getElementById('tabInterfaces').onclick = function() {
+  switchTab('interfaces');
+  loadInterfaces();
+};
+document.getElementById('tabConfig').onclick = function() {
+  switchTab('config');
+  loadConfig();
+};
+function switchTab(t) {
+  ['Station','Ap','Clients','Interfaces','Config'].forEach(function(name) {
+    var panel = document.getElementById('panel' + name);
+    var tab = document.getElementById('tab' + name);
+    if (name.toLowerCase() === t) {
+      panel.style.display = 'block';
+      tab.classList.add('active');
+    } else {
+      panel.style.display = 'none';
+      tab.classList.remove('active');
+    }
+  });
+}
+
+function fmtBytes(bytes) {
+  if (!bytes || bytes === 0) return '0 B';
+  var units = ['B','KB','MB','GB','TB'];
+  var i = Math.floor(Math.log(bytes) / Math.log(1024));
+  if (i >= units.length) i = units.length - 1;
+  return (bytes / Math.pow(1024, i)).toFixed(1) + ' ' + units[i];
+}
+
+function fmtDuration(seconds) {
+  if (!seconds || seconds < 0) return '-';
+  if (seconds < 60) return seconds + 's';
+  if (seconds < 3600) return Math.floor(seconds / 60) + 'm ' + (seconds % 60) + 's';
+  var h = Math.floor(seconds / 3600);
+  var m = Math.floor((seconds % 3600) / 60);
+  return h + 'h ' + m + 'm';
+}
+
+async function loadClients() {
+  var btn = document.getElementById('btnRefreshClients');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span>';
+  try {
+    var data = await fetchJSON(API + '/ap/clients');
+    var list = document.getElementById('clientsContent');
+    if (!data.clients || data.clients.length === 0) {
+      list.innerHTML = '<p style="color:#94a3b8;padding:12px">No clients connected</p>';
+      // Show blacklist
+      try {
+        var bl = await fetchJSON(API + '/ap/blacklist');
+        if (bl.blacklist && bl.blacklist.length > 0) {
+          list.innerHTML += '<div style="margin-top:8px"><strong style="font-size:.8rem">Blacklisted:</strong><br>' +
+            bl.blacklist.map(function(m) { return '<span style="font-size:.75rem;color:#fca5a5">' + m + '</span>'; }).join(' | ') + '</div>';
+        }
+      } catch(e) {}
+      return;
+    }
+    list.innerHTML = data.clients.map(function(c) {
+      var sig = c.signal > -50 ? 4 : c.signal > -65 ? 3 : c.signal > -75 ? 2 : 1;
+      var sigClass = 'signal-' + sig;
+      return '<div style="background:#0f172a;border-radius:8px;padding:10px 12px;margin-bottom:6px;border:1px solid #334155">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center">' +
+        '<div style="flex:1;min-width:0">' +
+        '<strong>' + escapeHtml(c.hostname || c.ip || c.mac) + '</strong>' +
+        '<div style="font-size:.75rem;color:#94a3b8">' + escapeHtml(c.mac) + (c.ip ? ' | ' + c.ip : '') + '</div>' +
+        '</div>' +
+        '<div style="text-align:right;font-size:.8rem">' +
+        '<span style="display:flex;align-items:center;gap:4px">' + c.signal + ' dBm <span class="signal-dot ' + sigClass + '"></span></span>' +
+        '<div style="color:#94a3b8;font-size:.75rem">' + fmtDuration(c.connected_seconds) + '</div>' +
+        '</div>' +
+        '</div>' +
+        '<div style="margin-top:6px;display:flex;gap:6px">' +
+        '<button class="btn btn-danger" style="padding:2px 10px;font-size:.7rem" onclick="kickClient(\'' + c.mac + '\')">Kick</button>' +
+        '<button class="btn" style="padding:2px 10px;font-size:.7rem;background:#4a044e;color:#f0abfc" onclick="blacklistMac(\'' + c.mac + '\')">Block</button>' +
+        '</div>' +
+        '</div>';
+    }).join('');
+  } catch(e) {
+    document.getElementById('clientsContent').innerHTML = '<p style="color:#fca5a5">Error loading clients</p>';
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '🔄 Refresh';
+  }
+}
+
+async function kickClient(mac) {
+  var data = await fetchJSON(API + '/ap/clients/kick', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({mac: mac})
+  });
+  showToast(data.message, data.ok);
+  if (data.ok) setTimeout(loadClients, 500);
+}
+
+async function blacklistMac(mac) {
+  if (!confirm('Block ' + mac + '? Client will be disconnected and blocked from reconnecting.')) return;
+  var data = await fetchJSON(API + '/ap/clients/blacklist', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({mac: mac})
+  });
+  showToast(data.message, data.ok);
+  if (data.ok) setTimeout(loadClients, 500);
+}
+
+// --- Interfaces ---
+async function loadInterfaces() {
+  var btn = document.getElementById('btnRefreshIfaces');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span>';
+  try {
+    var data = await fetchJSON(API + '/interfaces');
+    var list = document.getElementById('interfacesContent');
+    if (!data.interfaces || data.interfaces.length === 0) {
+      list.innerHTML = '<p style="color:#94a3b8;padding:12px">No interfaces found</p>';
+      return;
+    }
+    list.innerHTML = data.interfaces.map(function(i) {
+      var ips = i.ipv4.concat(i.ipv6).join(', ') || '-';
+      var st = i.state === 'up' ? badgeHtml('UP', 'green') : badgeHtml('DOWN', 'red');
+      var spd = i.speed || '-';
+      return '<div style="background:#0f172a;border-radius:8px;padding:12px;margin-bottom:8px;border:1px solid #334155">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">' +
+        '<strong style="font-size:1rem">' + escapeHtml(i.name) + '</strong>' +
+        '<span>' + st + '</span>' +
+        '</div>' +
+        '<div class="grid3">' +
+        stat('MAC', i.mac || '-') +
+        stat('MTU', i.mtu) +
+        stat('Speed', spd) +
+        stat('IPv4', ips) +
+        stat('RX', fmtBytes(i.rx_bytes)) +
+        stat('TX', fmtBytes(i.tx_bytes)) +
+        '</div>' +
+        '</div>';
+    }).join('');
+  } catch(e) {
+    document.getElementById('interfacesContent').innerHTML = '<p style="color:#fca5a5">Error loading interfaces</p>';
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '🔄 Refresh';
+  }
+}
+
+// --- Init ---
+loadStatus();
+loadDeps();
+setInterval(loadStatus, 10000);
+
+// --- Dependencies ---
+async function loadDeps() {
+  try {
+    var data = await fetchJSON(API + '/deps');
+    var panel = document.getElementById('depsPanel');
+    var badge = document.getElementById('depsBadge');
+    var missing = Object.keys(data.missing);
+    if (missing.length === 0) {
+      badge.innerHTML = badgeHtml('All tools OK', 'green');
+      panel.style.display = 'none';
+    } else {
+      badge.innerHTML = badgeHtml('Missing ' + missing.length + ' tools', 'red') +
+        ' <button class="btn btn-primary btn-sm" onclick="installDeps()" style="padding:2px 10px;font-size:.75rem">Install</button>';
+      panel.style.display = 'block';
+      panel.innerHTML = '<h2>Missing Dependencies</h2>' +
+        missing.map(function(k) { return '<div class="stat"><label>' + k + '</label><span>' + data.missing[k] + '</span></div>'; }).join('') +
+        '<div style="margin-top:8px"><button class="btn btn-success" onclick="installDeps()" id="btnInstallDeps">Install Missing Packages</button></div>' +
+        '<div id="installMsg" style="margin-top:8px;font-size:.85rem"></div>';
+    }
+  } catch(e) { /* ignore */ }
+}
+
+async function installDeps() {
+  var btn = document.getElementById('btnInstallDeps');
+  var msg = document.getElementById('installMsg');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Installing...';
+  msg.textContent = '';
+  try {
+    var data = await fetchJSON(API + '/deps/install', {method: 'POST'});
+    if (data.ok) {
+      msg.innerHTML = '<span style="color:#6ee7b7">' + data.message + '</span>';
+      setTimeout(loadDeps, 1000);
+    } else {
+      msg.innerHTML = '<span style="color:#fca5a5">' + data.message + '</span>' +
+        (data.manual_cmd ? '<br><code style="background:#0f172a;padding:4px 8px;border-radius:4px;display:inline-block;margin-top:4px;font-size:.8rem;word-break:break-all">' +
+        escapeHtml(data.manual_cmd) + '</code>' : '');
+    }
+  } catch(e) {
+    msg.innerHTML = '<span style="color:#fca5a5">Installation failed</span>';
+  }
+  btn.disabled = false;
+  btn.innerHTML = 'Install Missing Packages';
+}
+
+function badgeHtml(text, color) {
+  return '<span class="badge badge-' + color + '">' + text + '</span>';
+}
+</script>
+</body>
+</html>
