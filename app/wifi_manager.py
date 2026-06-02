@@ -11,6 +11,8 @@ from app.config import (
     AP_PASSWORD, AP_SSID, AP_STATE_FILE, BLACKLIST_FILE, CAPTIVE_PORTAL_URL,
     DNSMASQ_CONFIG_PATH, DNSMASQ_PID_PATH, HOSTAPD_CONFIG_PATH,
     WIFI_INTERFACE, WPASUPPLICANT_CONFIG_PATH, WEB_PORT,
+    get_configured_ap_iface, get_configured_sta_iface, load_radio_config,
+    save_radio_config, RADIO_CONFIG_FILE,
 )
 
 
@@ -19,6 +21,7 @@ class WiFiNetwork:
     bssid: str = ""
     ssid: str = ""
     channel: str = ""
+    frequency: str = ""
     signal: int = 0
     security: str = ""
 
@@ -46,6 +49,18 @@ class InterfaceCapabilities:
     additional_interfaces: list = field(default_factory=list)
 
 
+@dataclass
+class RadioInfo:
+    phy: str = ""
+    iface: str = ""
+    driver: str = ""
+    supports_ap: bool = False
+    supports_station: bool = False
+    supports_dual: bool = False
+    supports_dual_channel: bool = False
+    channel: int = 0
+
+
 def _run(cmd: list[str], timeout: int = 15) -> tuple[int, str, str]:
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
@@ -56,12 +71,109 @@ def _run(cmd: list[str], timeout: int = 15) -> tuple[int, str, str]:
         return -2, "", "timeout"
 
 
+def detect_wireless_radios() -> dict:
+    """Detect all wireless radios (PHYs) and their capabilities.
+
+    Returns: {
+      'single_nic': bool,       # True if only one physical NIC
+      'dual_nic': bool,         # True if 2+ physical NICs
+      'radios': [RadioInfo, ...],
+      'configured': bool,       # True if user already chose AP/STA assignment
+      'ap_iface': str | None,   # Currently configured AP interface
+      'sta_iface': str | None,  # Currently configured STA interface
+    }
+    """
+    code, out, _ = _run(["iw", "dev"])
+    if code != 0:
+        return {"single_nic": True, "dual_nic": False, "radios": [], "configured": False, "ap_iface": None, "sta_iface": None}
+
+    phys: dict[str, list[str]] = {}
+    lines = out.strip().split("\n")
+    current_phy = ""
+    for line in lines:
+        m = re.match(r"phy#(\d+)", line)
+        if m:
+            current_phy = f"phy{m.group(1)}"
+            if current_phy not in phys:
+                phys[current_phy] = []
+        if current_phy and "\tInterface " in line:
+            iface = line.strip().split()[-1]
+            if iface not in phys[current_phy]:
+                phys[current_phy].append(iface)
+
+    radios = []
+    for phy_name in sorted(phys.keys()):
+        ifaces = phys[phy_name]
+        main_iface = [i for i in ifaces if not i.endswith(("_ap", "_sta"))]
+        if not main_iface:
+            main_iface = ifaces
+        main_iface = main_iface[0]
+
+        driver = ""
+        _, phy_info, _ = _run(["iw", main_iface, "info"])
+        m = re.search(r"driver:\s+(\S+)", phy_info)
+        if m:
+            driver = m.group(1)
+
+        _, phy_dump, _ = _run(["iw", phy_name, "info"])
+        supports_ap = "AP" in phy_dump
+        supports_station = "managed" in phy_dump.lower() or "station" in phy_dump.lower()
+
+        supports_dual = supports_ap and supports_station and len(ifaces) > 1
+        if not supports_dual:
+            test_code, _, _ = _run(["iw", phy_name, "interface", "add", "__dual_test", "type", "managed"])
+            if test_code == 0:
+                _run(["iw", "dev", "__dual_test", "del"])
+                supports_dual = True
+            elif supports_ap and supports_station:
+                dual_friendly = ["ath9k", "ath10k", "ath11k", "mt76", "iwlwifi",
+                                 "rtl8723", "rtl8821", "rtl8822", "brcmfmac"]
+                if any(d in driver.lower() for d in dual_friendly):
+                    supports_dual = True
+
+        supports_dual_channel = False
+        if "valid interface combinations" in phy_dump:
+            section = phy_dump.split("valid interface combinations:")[1]
+            section = section[:section.find("\n\n")] if "\n\n" in section else section
+            if ("AP" in section or "ap" in section) and ("managed" in section.lower() or "station" in section.lower()):
+                if "#channels <= 2" in section:
+                    supports_dual_channel = True
+
+        radios.append(RadioInfo(
+            phy=phy_name,
+            iface=main_iface,
+            driver=driver,
+            supports_ap=supports_ap,
+            supports_station=supports_station,
+            supports_dual=supports_dual,
+            supports_dual_channel=supports_dual_channel,
+        ))
+
+    single_nic = len(radios) <= 1
+    dual_nic = len(radios) >= 2
+    cfg = load_radio_config()
+    configured = bool(cfg.get("ap_iface"))
+
+    return {
+        "single_nic": single_nic,
+        "dual_nic": dual_nic,
+        "radios": radios,
+        "configured": configured,
+        "ap_iface": cfg.get("ap_iface"),
+        "sta_iface": cfg.get("sta_iface"),
+    }
+
+
 def _find_wireless_iface() -> str | None:
-    """Find the primary managed wireless interface for station/scanning."""
+    """Find the primary managed wireless interface for station/scanning.
+    Prefers configured STA interface, then virtual STA, then main interface."""
+    sta_cfg = get_configured_sta_iface()
+    if sta_cfg and os.path.exists(f"/sys/class/net/{sta_cfg}"):
+        return sta_cfg
+    # Prefer virtual STA interface for scanning
     code, out, _ = _run(["iw", "dev"])
     if code != 0:
         return None
-    # Prefer virtual STA interface for scanning
     for m in re.finditer(r"Interface\s+(\w+)", out):
         name = m.group(1)
         if name.endswith("_sta"):
@@ -247,12 +359,12 @@ def scan_networks(iface: str | None = None) -> tuple[list[WiFiNetwork], str]:
     if iface is None:
         return [], "No wireless interface found"
 
-    base_iface = WIFI_INTERFACE
+    ap_iface = get_configured_ap_iface() or WIFI_INTERFACE
 
     candidates = [iface]
-    if iface.endswith("_sta") and os.path.exists(f"/sys/class/net/{base_iface}"):
-        if base_iface not in candidates:
-            candidates.append(base_iface)
+    if iface.endswith("_sta") and os.path.exists(f"/sys/class/net/{ap_iface}"):
+        if ap_iface not in candidates:
+            candidates.append(ap_iface)
 
     last_error = ""
     for cand in candidates:
@@ -265,9 +377,10 @@ def scan_networks(iface: str | None = None) -> tuple[list[WiFiNetwork], str]:
         if error.strip():
             last_error = error.strip()
     else:
-        # All normal scans failed. If AP is running, briefly pause it to scan.
         if _ap_is_running():
-            code, out, err = _scan_with_ap_pause(base_iface)
+            if _is_dual_channel_mode():
+                return [], f"Scan failed: {last_error}" if last_error else "Scan failed: No networks found"
+            code, out, err = _scan_with_ap_pause(ap_iface)
             if code != 0 or not out:
                 error = err or out
                 return [], f"Scan failed: {error.strip()}" if error.strip() else "Scan failed after AP pause"
@@ -303,6 +416,7 @@ def scan_networks(iface: str | None = None) -> tuple[list[WiFiNetwork], str]:
                     bssid=current_bss,
                     ssid=current_ssid,
                     channel=ch,
+                    frequency=current_freq,
                     signal=current_signal,
                     security=current_security,
                 )
@@ -350,11 +464,34 @@ def scan_networks(iface: str | None = None) -> tuple[list[WiFiNetwork], str]:
             bssid=current_bss,
             ssid=current_ssid,
             channel=ch,
+            frequency=current_freq,
             signal=current_signal,
             security=current_security,
         )
 
     return sorted(networks.values(), key=lambda n: n.signal, reverse=True), ""
+def _is_dual_channel_mode() -> bool:
+    """Check if dual-channel operation is currently possible
+    (AP and STA can operate on different channels simultaneously)."""
+    sta_cfg = get_configured_sta_iface()
+    ap_cfg = get_configured_ap_iface() or WIFI_INTERFACE
+    # Dual-NIC: different physical interfaces always support different channels
+    if sta_cfg and sta_cfg != ap_cfg and os.path.exists(f"/sys/class/net/{sta_cfg}"):
+        return True
+    # Single NIC: check if phy supports dual-channel
+    if os.path.exists(f"/sys/class/net/{ap_cfg}"):
+        phy = _get_phy(ap_cfg)
+        if phy:
+            _, phy_dump, _ = _run(["iw", phy, "info"])
+            if "valid interface combinations" in phy_dump:
+                section = phy_dump.split("valid interface combinations:")[1]
+                section = section[:section.find("\n\n")] if "\n\n" in section else section
+                if ("AP" in section or "ap" in section) and ("managed" in section.lower() or "station" in section.lower()):
+                    if "#channels <= 2" in section:
+                        return True
+    return False
+
+
 def get_wifi_status(iface: str | None = None) -> WiFiStatus:
     """Get current WiFi status of the interface."""
     if iface is None:
@@ -441,7 +578,7 @@ def start_ap(iface: str | None = None, ssid: str = "", password: str = "",
              channel: int = 0, dual: bool = True) -> tuple[bool, str]:
     """Start AP mode. Uses virtual STA for station/scanning when dual=True."""
     if iface is None:
-        iface = WIFI_INTERFACE
+        iface = get_configured_ap_iface() or WIFI_INTERFACE
     # Verify interface exists
     code, _, _ = _run(["iw", "dev", iface, "info"])
     if code != 0:
@@ -456,29 +593,32 @@ def start_ap(iface: str | None = None, ssid: str = "", password: str = "",
     # Stop any existing services
     _stop_hostapd()
     _stop_dnsmasq()
+    _run(["systemctl", "stop", "wpa_supplicant"])
     time.sleep(0.5)
 
-    # Check dual mode support
-    caps = get_interface_capabilities(iface)
-    use_virtual = dual and caps is not None and caps.supports_dual
+    sta_cfg = get_configured_sta_iface()
+    is_dual_nic = bool(sta_cfg and sta_cfg != iface and os.path.exists(f"/sys/class/net/{sta_cfg}"))
     ap_iface = iface
+
+    if is_dual_nic:
+        use_virtual = False
+    else:
+        caps = get_interface_capabilities(iface)
+        use_virtual = dual and caps is not None and caps.supports_dual
+        if dual and not use_virtual:
+            return False, "Dual mode requested but not supported by this interface"
 
     if use_virtual:
         phy = _get_phy(iface)
         if not phy:
             return False, "Could not determine phy for interface"
 
-        # Ath10k driver requires hostapd to be running before creating AP interfaces.
-        # Strategy: use main iface for AP, create virtual STA for scanning instead.
         sta_iface = f"{iface}_sta"
 
-        # Remove stale STA virtual interface
         _run(["ip", "link", "set", sta_iface, "down"])
         _run(["iw", "dev", sta_iface, "del"])
         time.sleep(0.5)
 
-        # Create managed virtual interface for station/scanning with unique MAC
-        # Use a derived MAC to avoid conflict with main AP interface
         sta_mac = _derive_sta_mac(iface)
         code, out, err = _run(["iw", phy, "interface", "add", sta_iface, "type", "managed",
                                "addr", sta_mac])
@@ -488,17 +628,14 @@ def start_ap(iface: str | None = None, ssid: str = "", password: str = "",
                                    "addr", sta_mac])
 
         if code != 0:
-            print(f"STA virtual creation failed: {(err or out).strip()}", file=sys.stderr)
-            use_virtual = False
-        else:
-            _run(["ip", "link", "set", sta_iface, "up"])
-            _run(["pkill", "-f", f"wpa_supplicant.*{iface}"])
-            _run(["ip", "link", "set", iface, "down"])
-            _run(["iw", "dev", iface, "set", "type", "ap"])
-    else:
-        # Kill any wpa_supplicant on the interface (to free it up)
+            detail = (err or out).strip()
+            return False, f"Failed to create virtual STA interface: {detail}"
+        _run(["ip", "link", "set", sta_iface, "up"])
         _run(["pkill", "-f", f"wpa_supplicant.*{iface}"])
-        # Switch interface to AP mode
+        _run(["ip", "link", "set", iface, "down"])
+        _run(["iw", "dev", iface, "set", "type", "ap"])
+    else:
+        _run(["pkill", "-f", f"wpa_supplicant.*{iface}"])
         _run(["ip", "link", "set", iface, "down"])
         time.sleep(0.5)
         _run(["iw", "dev", iface, "set", "type", "ap"])
@@ -522,7 +659,6 @@ def start_ap(iface: str | None = None, ssid: str = "", password: str = "",
     if code != 0:
         error_detail = (err or out).strip()
         if "Name not unique" in error_detail and use_virtual:
-            # Stale virtual interface leaked, retry once
             _run(["ip", "link", "set", ap_iface, "down"])
             _run(["iw", "dev", ap_iface, "del"])
             time.sleep(0.5)
@@ -759,15 +895,18 @@ def stop_ap() -> tuple[bool, str]:
 
 
 def connect_to_wifi(ssid: str, password: str = "",
-                    iface: str | None = None) -> tuple[bool, str]:
+                    iface: str | None = None,
+                    frequency: str = "") -> tuple[bool, str]:
     """Connect to a WiFi network as a client."""
     if iface is None:
         iface = _find_wireless_iface()
     if iface is None:
         return False, "No wireless interface found"
 
-    # Kill any existing wpa_supplicant for this interface
-    _run(["pkill", "-f", f"wpa_supplicant.*{iface}"])
+    # Kill any running wpa_supplicant instances
+    _run(["pkill", "-9", "-f", "wpa_supplicant"])
+    _run(["systemctl", "stop", "wpa_supplicant"])
+    time.sleep(1)
 
     # Reset interface to managed mode (don't touch virtual AP)
     _run(["ip", "link", "set", iface, "down"])
@@ -776,7 +915,7 @@ def connect_to_wifi(ssid: str, password: str = "",
     _run(["ip", "link", "set", iface, "up"])
 
     # Generate wpa_supplicant config
-    wpa_conf = _generate_wpa_config(ssid, password)
+    wpa_conf = _generate_wpa_config(ssid, password, frequency)
     try:
         os.remove(WPASUPPLICANT_CONFIG_PATH)
     except OSError:
@@ -785,17 +924,22 @@ def connect_to_wifi(ssid: str, password: str = "",
         f.write(wpa_conf)
     os.chmod(WPASUPPLICANT_CONFIG_PATH, 0o600)
 
+    # Ensure ctrl_interface directory exists
+    os.makedirs("/var/run/wpa_supplicant", exist_ok=True)
+
     # Start wpa_supplicant
-    _, _, err = _run([
+    wpacode, _, wpaerr = _run([
         "wpa_supplicant", "-B", "-i", iface,
         "-c", WPASUPPLICANT_CONFIG_PATH
     ])
+    if wpacode != 0:
+        return False, f"Failed to start wpa_supplicant: {wpaerr}"
     time.sleep(2)
 
     # Run dhclient to get IP
-    code, _, _ = _run(["dhclient", "-v", iface], timeout=20)
+    code, _, dherr = _run(["dhclient", "-v", iface], timeout=20)
     if code != 0:
-        return False, f"Connected but failed to get IP via DHCP: {err}"
+        return False, f"Connected but failed to get IP via DHCP: {dherr}"
 
     return True, f"Connected to '{ssid}'"
 
@@ -810,6 +954,7 @@ def disconnect_wifi(iface: str | None = None) -> tuple[bool, str]:
     _run(["pkill", "-f", f"wpa_supplicant.*{iface}"])
     _run(["dhclient", "-r", iface])
     _run(["ip", "addr", "flush", "dev", iface])
+    _run(["systemctl", "start", "wpa_supplicant"])
     return True, "Disconnected"
 
 
@@ -900,28 +1045,23 @@ def _generate_hostapd_config(iface: str, ssid: str, password: str, channel: int)
     return "\n".join(line for line in lines if line)
 
 
-def _generate_wpa_config(ssid: str, password: str) -> str:
+def _generate_wpa_config(ssid: str, password: str, frequency: str = "") -> str:
     """Generate wpa_supplicant configuration file content."""
     lines = [
         "ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev",
         "update_config=1",
         "country=US",
     ]
+    net_lines = [f'\tssid="{ssid}"']
     if password:
-        lines += [
-            "network={",
-            f'\tssid="{ssid}"',
-            f'\tpsk="{password}"',
-            "\tscan_ssid=1",
-            "}",
-        ]
+        net_lines += [f'\tpsk="{password}"', "\tscan_ssid=1"]
     else:
-        lines += [
-            "network={",
-            f'\tssid="{ssid}"',
-            "\tkey_mgmt=NONE",
-            "}",
-        ]
+        net_lines.append("\tkey_mgmt=NONE")
+    if frequency:
+        net_lines.append(f"\tscan_freq={frequency}")
+    lines.append("network={")
+    lines.extend(net_lines)
+    lines.append("}")
     return "\n".join(lines)
 
 

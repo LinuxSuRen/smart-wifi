@@ -5,17 +5,18 @@ from flask import Flask, jsonify, render_template, request
 from app.config import (AP_CHANNEL, AP_IP, AP_NETMASK, AP_PASSWORD, AP_SSID,
                         CAPTIVE_PORTAL_URL, WIFI_INTERFACE, WEB_HOST, WEB_PORT,
                         AP_STATE_FILE, AP_DHCP_START, AP_DHCP_END)
-from app.wifi_manager import (WiFiNetwork, WiFiStatus,
-                              connect_to_wifi, disconnect_wifi,
-                              get_ap_clients, get_blacklist,
-                              kick_client, blacklist_client, unblacklist_client,
-                              get_interface_capabilities, get_wifi_status,
-                              get_network_interfaces,
-                              restore_ap_state,
-                              scan_networks, set_captive_portal_url, set_dhcp_settings,
-                              start_ap, stop_ap,
-                              cleanup_wireless,
-                              check_dependencies, install_dependencies)
+from app.wifi_manager import (WiFiNetwork, WiFiStatus, RadioInfo,
+                               connect_to_wifi, disconnect_wifi,
+                               get_ap_clients, get_blacklist,
+                               kick_client, blacklist_client, unblacklist_client,
+                               get_interface_capabilities, get_wifi_status,
+                               get_network_interfaces,
+                               restore_ap_state,
+                               scan_networks, set_captive_portal_url, set_dhcp_settings,
+                               start_ap, stop_ap,
+                               cleanup_wireless, detect_wireless_radios,
+                               check_dependencies, install_dependencies)
+from app.config import save_radio_config
 
 
 def create_app() -> Flask:
@@ -44,9 +45,10 @@ def create_app() -> Flask:
         data = request.get_json(silent=True) or {}
         ssid = data.get("ssid", "")
         password = data.get("password", "")
+        frequency = data.get("frequency", "")
         if not ssid:
             return jsonify({"ok": False, "message": "SSID is required"}), 400
-        ok, msg = connect_to_wifi(ssid, password)
+        ok, msg = connect_to_wifi(ssid, password, frequency=frequency)
         return jsonify({"ok": ok, "message": msg})
 
     @app.route("/api/disconnect", methods=["POST"])
@@ -187,9 +189,21 @@ def create_app() -> Flask:
     def api_reset():
         ok, msg = cleanup_wireless()
         return jsonify({"ok": ok, "message": msg})
-    def api_reset():
-        ok, msg = cleanup_wireless()
-        return jsonify({"ok": ok, "message": msg})
+
+    @app.route("/api/radios/detect")
+    def api_radios_detect():
+        info = detect_wireless_radios()
+        return jsonify({"ok": True, **info, "radios": [_radio_to_dict(r) for r in info["radios"]]})
+
+    @app.route("/api/radios/configure", methods=["POST"])
+    def api_radios_configure():
+        data = request.get_json(silent=True) or {}
+        ap_iface = data.get("ap_iface", "")
+        sta_iface = data.get("sta_iface", "")
+        if not ap_iface or not sta_iface:
+            return jsonify({"ok": False, "message": "Both ap_iface and sta_iface are required"}), 400
+        save_radio_config(ap_iface, sta_iface)
+        return jsonify({"ok": True, "message": f"Configured AP={ap_iface}, STA={sta_iface}"})
 
     @app.route("/api/interfaces")
     def api_interfaces():
@@ -258,6 +272,7 @@ def _net_to_dict(n: WiFiNetwork) -> dict:
         "bssid": n.bssid,
         "ssid": n.ssid,
         "channel": n.channel,
+        "frequency": n.frequency,
         "signal": n.signal,
         "security": n.security,
     }
@@ -284,4 +299,16 @@ def _client_to_dict(c) -> dict:
         "hostname": c.hostname,
         "signal": c.signal,
         "connected_seconds": c.connected_seconds,
+    }
+
+
+def _radio_to_dict(r: RadioInfo) -> dict:
+    return {
+        "phy": r.phy,
+        "iface": r.iface,
+        "driver": r.driver,
+        "supports_ap": r.supports_ap,
+        "supports_station": r.supports_station,
+        "supports_dual": r.supports_dual,
+        "supports_dual_channel": r.supports_dual_channel,
     }

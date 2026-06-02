@@ -169,8 +169,21 @@ input:focus,select:focus{outline:none;border-color:#3b82f6}
             <div style="display:flex;gap:8px">
               <input type="text" id="apDhcpStart" placeholder="192.168.4.2" style="width:50%">
               <input type="text" id="apDhcpEnd" placeholder="192.168.4.100" style="width:50%">
-            </div>
-          </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="radioModal" style="display:none">
+  <div class="modal">
+    <h3>Multiple WiFi Radios Detected</h3>
+    <p style="color:#94a3b8;font-size:.85rem;margin-bottom:16px">
+      Two wireless network cards found. Select one for AP (Hotspot) and one for STA (WiFi Client).</p>
+    <div id="radioContent"></div>
+    <div class="actions" style="justify-content:space-between">
+      <button type="button" class="btn btn-danger" onclick="skipRadioConfig()">Skip</button>
+      <button type="button" class="btn btn-primary" onclick="applyRadioConfig()">Apply</button>
+    </div>
+  </div>
+</div>
         </div>
         <div style="display:flex;gap:8px;margin-top:8px">
           <button type="submit" class="btn btn-success" id="btnStartAp">Start AP</button>
@@ -216,6 +229,7 @@ input:focus,select:focus{outline:none;border-color:#3b82f6}
   <div class="modal">
     <h3>Connect to WiFi</h3>
     <form onsubmit="connectToWifi(event)">
+      <input type="hidden" id="connectFrequency">
       <div class="form-group">
         <label>SSID</label>
         <input type="text" id="connectSsid" readonly>
@@ -310,7 +324,7 @@ async function scanNetworks() {
       const sig = n.signal > -50 ? 4 : n.signal > -65 ? 3 : n.signal > -75 ? 2 : 1;
       const lock = n.security !== 'Open' ? ' 🔒' : '';
       return '<div class="network-item" onclick="openConnectModal(\'' +
-        escapeHtml(n.ssid) + '\', \'' + n.security + '\')">' +
+        escapeHtml(n.ssid) + '\', \'' + n.security + '\', \'' + (n.frequency || '') + '\')">' +
         '<div class="info"><div class="ssid">' + escapeHtml(n.ssid) + lock + '</div>' +
         '<div class="meta">' + n.security + ' | Ch ' + n.channel + ' | ' + n.bssid + '</div></div>' +
         '<div class="signal">' + n.signal + ' dBm' +
@@ -332,8 +346,9 @@ function escapeHtml(s) {
 }
 
 // --- Connect ---
-function openConnectModal(ssid, security) {
+function openConnectModal(ssid, security, frequency) {
   document.getElementById('connectSsid').value = ssid;
+  document.getElementById('connectFrequency').value = frequency || '';
   document.getElementById('connectPassword').value = '';
   document.getElementById('connectPassword').style.display = security === 'Open' ? 'none' : 'block';
   document.getElementById('connectModal').style.display = 'flex';
@@ -350,14 +365,29 @@ async function connectToWifi(e) {
   e.preventDefault();
   const ssid = document.getElementById('connectSsid').value;
   const pwd = document.getElementById('connectPassword').value;
-  closeModal();
-  const data = await fetchJSON(API + '/connect', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ssid, password: pwd})
-  });
-  showToast(data.message, data.ok);
-  if (data.ok) setTimeout(loadStatus, 2000);
+  const freq = document.getElementById('connectFrequency').value;
+  const overlay = document.getElementById('connectModal');
+  const form = overlay.querySelector('form');
+  const btn = form.querySelector('button[type=submit]');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Connecting...';
+  form.querySelector('button[type=button]').disabled = true;
+  try {
+    const data = await fetchJSON(API + '/connect', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ssid, password: pwd, frequency: freq})
+    });
+    closeModal();
+    showToast(data.message, data.ok);
+    if (data.ok) setTimeout(loadStatus, 2000);
+  } catch(e) {
+    showToast('Connection failed: ' + e.message, false);
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = 'Connect';
+    form.querySelector('button[type=button]').disabled = false;
+  }
 }
 
 // --- AP ---
@@ -603,7 +633,75 @@ async function loadInterfaces() {
 // --- Init ---
 loadStatus();
 loadDeps();
+checkRadioConfig();
 setInterval(loadStatus, 10000);
+
+async function checkRadioConfig() {
+  try {
+    var data = await fetchJSON(API + '/radios/detect');
+    if (!data.ok) return;
+    var apConfig = document.getElementById('apConfig');
+    if (apConfig) apConfig.remove();
+    if (data.dual_nic && !data.configured) {
+      showRadioModal(data.radios);
+    } else if (data.configured) {
+      var tag = document.createElement('span');
+      tag.id = 'apConfig';
+      tag.style.cssText = 'font-size:.75rem;color:#93c5fd;margin-left:8px';
+      tag.textContent = 'AP: ' + data.ap_iface + ' | STA: ' + data.sta_iface;
+      document.getElementById('sysSubtitle').appendChild(tag);
+    } else if (data.single_nic && data.radios.length > 0) {
+      var r = data.radios[0];
+      if (r.supports_dual_channel) {
+        var tag2 = document.createElement('span');
+        tag2.id = 'apConfig';
+        tag2.style.cssText = 'font-size:.75rem;color:#6ee7b7;margin-left:8px';
+        tag2.textContent = 'dual-channel supported';
+        document.getElementById('sysSubtitle').appendChild(tag2);
+      }
+    }
+  } catch(e) { /* ignore */ }
+}
+
+var _radioData = null;
+function showRadioModal(radios) {
+  _radioData = radios;
+  var html = '<div class="form-group"><label>AP Interface (Hotspot)</label><select id="selApIface">';
+  radios.forEach(function(r) {
+    html += '<option value="' + r.iface + '">' + r.iface + ' (phy: ' + r.phy + ', ' + r.driver + ')</option>';
+  });
+  html += '</select></div>';
+  html += '<div class="form-group"><label>STA Interface (WiFi Client)</label><select id="selStaIface">';
+  radios.forEach(function(r, i) {
+    var sel = i === 1 || (radios.length === 1 && i === 0) ? ' selected' : '';
+    html += '<option value="' + r.iface + '"' + sel + '>' + r.iface + ' (phy: ' + r.phy + ', ' + r.driver + ')</option>';
+  });
+  html += '</select></div>';
+  document.getElementById('radioContent').innerHTML = html;
+  document.getElementById('radioModal').style.display = 'flex';
+}
+
+async function applyRadioConfig() {
+  var ap = document.getElementById('selApIface').value;
+  var sta = document.getElementById('selStaIface').value;
+  try {
+    var data = await fetchJSON(API + '/radios/configure', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ap_iface: ap, sta_iface: sta})
+    });
+    document.getElementById('radioModal').style.display = 'none';
+    showToast(data.message, data.ok);
+    if (data.ok) setTimeout(function() { location.reload(); }, 1500);
+  } catch(e) {
+    showToast('Failed to configure radios', false);
+  }
+}
+
+function skipRadioConfig() {
+  _radioData = null;
+  document.getElementById('radioModal').style.display = 'none';
+}
 
 // --- Dependencies ---
 async function loadDeps() {

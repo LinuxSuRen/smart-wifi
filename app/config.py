@@ -1,3 +1,4 @@
+import json as _json
 import os
 
 WIFI_INTERFACE = os.environ.get("WIFI_INTERFACE", "wlp2s0")
@@ -19,3 +20,36 @@ WEB_PORT = int(os.environ.get("WEB_PORT", "8080"))
 CAPTIVE_PORTAL_URL = os.environ.get("CAPTIVE_PORTAL_URL", "")
 AP_STATE_FILE = "/tmp/smart-wifi-ap-state.json"
 BLACKLIST_FILE = "/tmp/smart-wifi-blacklist.txt"
+RADIO_CONFIG_FILE = "/tmp/smart-wifi-radio-config.json"
+
+
+# ---- radio config persistence ----
+
+def load_radio_config() -> dict:
+    """Load the radio assignment config. Returns empty dict if not set."""
+    try:
+        with open(RADIO_CONFIG_FILE) as f:
+            return _json.loads(f.read())
+    except (OSError, _json.JSONDecodeError):
+        return {}
+
+
+def save_radio_config(ap_iface: str, sta_iface: str):
+    """Save radio assignment: which interface is AP, which is STA."""
+    try:
+        with open(RADIO_CONFIG_FILE, "w") as f:
+            _json.dump({"ap_iface": ap_iface, "sta_iface": sta_iface}, f)
+    except OSError:
+        pass
+
+
+def get_configured_ap_iface() -> str | None:
+    """Return the configured AP interface, or None if not set."""
+    cfg = load_radio_config()
+    return cfg.get("ap_iface")
+
+
+def get_configured_sta_iface() -> str | None:
+    """Return the configured STA interface, or None if not set."""
+    cfg = load_radio_config()
+    return cfg.get("sta_iface")
