@@ -37,7 +37,8 @@ def create_app() -> Flask:
 
     @app.route("/api/scan")
     def api_scan():
-        networks, error = scan_networks()
+        iface = request.args.get("iface")
+        networks, error = scan_networks(iface if iface else None)
         return jsonify({"networks": [_net_to_dict(n) for n in networks], "error": error})
 
     @app.route("/api/connect", methods=["POST"])

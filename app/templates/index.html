@@ -122,7 +122,10 @@ input:focus,select:focus{outline:none;border-color:#3b82f6}
     <div class="card">
       <h2 style="display:flex;justify-content:space-between;align-items:center">
         Available Networks
-        <button class="btn btn-primary btn-sm" onclick="scanNetworks()" id="btnScan">🔄 Scan</button>
+        <span>
+          <select id="scanInterface" style="width:auto;margin-right:8px;font-size:.8rem;padding:4px 8px"></select>
+          <button class="btn btn-primary btn-sm" onclick="scanNetworks()" id="btnScan">🔄 Scan</button>
+        </span>
       </h2>
       <div id="networkList" class="network-list">Click Scan to discover networks</div>
     </div>
@@ -266,8 +269,8 @@ async function loadStatus() {
   try {
     const data = await fetchJSON(API + '/status');
     const s = data.status;
-    document.getElementById('sysSubtitle').textContent =
-      'Interface: ' + (s.interface || 'N/A') + ' | Mode: ' + s.mode;
+    var sub = 'Interface: ' + (s.interface || 'N/A') + ' | Mode: ' + s.mode;
+    document.getElementById('sysSubtitle').innerHTML = sub;
     document.getElementById('statusContent').innerHTML =
       '<div class="grid3">' +
       stat('Interface', s.interface || 'N/A') +
@@ -295,6 +298,17 @@ async function loadStatus() {
   } catch(e) {
     document.getElementById('statusContent').innerHTML = 'Error loading status';
   }
+  // Show radio config info
+  try {
+    var rd = await fetchJSON(API + '/radios/detect');
+    if (rd.ok) {
+      var tags = [];
+      if (rd.configured) tags.push('<span style="color:#93c5fd">AP:' + rd.ap_iface + ' STA:' + rd.sta_iface + '</span>');
+      if (rd.single_nic && rd.radios.length > 0 && rd.radios[0].supports_dual_channel)
+        tags.push('<span style="color:#6ee7b7">dual-channel</span>');
+      if (tags.length) document.getElementById('sysSubtitle').innerHTML = sub + ' | ' + tags.join(' ');
+    }
+  } catch(e) {}
 }
 
 function stat(label, value) {
@@ -307,10 +321,12 @@ function badge(text, color) {
 // --- Scan ---
 async function scanNetworks() {
   const btn = document.getElementById('btnScan');
+  const sel = document.getElementById('scanInterface');
+  const iface = sel.value;
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner"></span> Scanning...';
   try {
-    const data = await fetchJSON(API + '/scan');
+    const data = await fetchJSON(API + '/scan' + (iface ? '?iface=' + encodeURIComponent(iface) : ''));
     const list = document.getElementById('networkList');
     if (data.error) {
       list.innerHTML = '<p style="color:#fca5a5;padding:12px">' + escapeHtml(data.error) + '</p>';
@@ -632,33 +648,33 @@ async function loadInterfaces() {
 
 // --- Init ---
 loadStatus();
+loadScanInterfaces();
 loadDeps();
 checkRadioConfig();
 setInterval(loadStatus, 10000);
+
+async function loadScanInterfaces() {
+  try {
+    var data = await fetchJSON(API + '/radios/detect');
+    var sel = document.getElementById('scanInterface');
+    sel.innerHTML = '<option value="">Auto</option>';
+    if (data.ok && data.radios) {
+      data.radios.forEach(function(r) {
+        sel.innerHTML += '<option value="' + r.iface + '">' + r.iface + ' (' + r.phy + ')</option>';
+      });
+    }
+    if (data.sta_iface) {
+      sel.value = data.sta_iface;
+    }
+  } catch(e) { /* ignore */ }
+}
 
 async function checkRadioConfig() {
   try {
     var data = await fetchJSON(API + '/radios/detect');
     if (!data.ok) return;
-    var apConfig = document.getElementById('apConfig');
-    if (apConfig) apConfig.remove();
     if (data.dual_nic && !data.configured) {
       showRadioModal(data.radios);
-    } else if (data.configured) {
-      var tag = document.createElement('span');
-      tag.id = 'apConfig';
-      tag.style.cssText = 'font-size:.75rem;color:#93c5fd;margin-left:8px';
-      tag.textContent = 'AP: ' + data.ap_iface + ' | STA: ' + data.sta_iface;
-      document.getElementById('sysSubtitle').appendChild(tag);
-    } else if (data.single_nic && data.radios.length > 0) {
-      var r = data.radios[0];
-      if (r.supports_dual_channel) {
-        var tag2 = document.createElement('span');
-        tag2.id = 'apConfig';
-        tag2.style.cssText = 'font-size:.75rem;color:#6ee7b7;margin-left:8px';
-        tag2.textContent = 'dual-channel supported';
-        document.getElementById('sysSubtitle').appendChild(tag2);
-      }
     }
   } catch(e) { /* ignore */ }
 }

@@ -152,39 +152,58 @@ def detect_wireless_radios() -> dict:
     single_nic = len(radios) <= 1
     dual_nic = len(radios) >= 2
     cfg = load_radio_config()
-    configured = bool(cfg.get("ap_iface"))
+    ap_cfg = cfg.get("ap_iface", "")
+    sta_cfg = cfg.get("sta_iface", "")
+    configured = bool(ap_cfg and sta_cfg and
+                      os.path.exists(f"/sys/class/net/{ap_cfg}") and
+                      os.path.exists(f"/sys/class/net/{sta_cfg}"))
+    if cfg and not configured:
+        try:
+            os.remove(RADIO_CONFIG_FILE)
+        except OSError:
+            pass
 
     return {
         "single_nic": single_nic,
         "dual_nic": dual_nic,
         "radios": radios,
         "configured": configured,
-        "ap_iface": cfg.get("ap_iface"),
-        "sta_iface": cfg.get("sta_iface"),
+        "ap_iface": ap_cfg,
+        "sta_iface": sta_cfg,
     }
 
 
 def _find_wireless_iface() -> str | None:
     """Find the primary managed wireless interface for station/scanning.
-    Prefers configured STA interface, then virtual STA, then main interface."""
+    Prefers configured STA interface, then virtual STA, then any managed interface."""
     sta_cfg = get_configured_sta_iface()
     if sta_cfg and os.path.exists(f"/sys/class/net/{sta_cfg}"):
         return sta_cfg
-    # Prefer virtual STA interface for scanning
     code, out, _ = _run(["iw", "dev"])
     if code != 0:
         return None
-    for m in re.finditer(r"Interface\s+(\w+)", out):
+    all_ifaces = list(re.finditer(r"Interface\s+(\w+)", out))
+    # Prefer virtual STA interface for scanning
+    for m in all_ifaces:
         name = m.group(1)
         if name.endswith("_sta"):
             return name
-    # Then prefer the configured main interface (non-AP)
-    for m in re.finditer(r"Interface\s+(\w+)", out):
+    # Then prefer any non-AP managed wireless interface (skip AP-mode interfaces)
+    for m in all_ifaces:
         name = m.group(1)
         if name == WIFI_INTERFACE and not name.endswith("_ap"):
-            return name
-    # Fallback: any managed interface that doesn't end with _ap
-    for m in re.finditer(r"Interface\s+(\w+)", out):
+            _, info_out, _ = _run(["iw", "dev", name, "info"])
+            if "type AP" not in info_out:
+                return name
+    # Fallback: any wireless interface not in AP mode
+    for m in all_ifaces:
+        name = m.group(1)
+        if not name.endswith("_ap") and name != WIFI_INTERFACE:
+            _, info_out, _ = _run(["iw", "dev", name, "info"])
+            if "type AP" not in info_out:
+                return name
+    # Last resort: any wireless interface that doesn't end with _ap
+    for m in all_ifaces:
         name = m.group(1)
         if not name.endswith("_ap"):
             return name
@@ -352,6 +371,16 @@ def _scan_with_ap_pause(base_iface: str) -> tuple[int, str, str]:
     return code, out, err
 
 
+def _scan_via_wpa_cli(iface: str) -> tuple[int, str, str]:
+    """Scan using wpa_cli through a running wpa_supplicant.
+    Returns wpa_cli scan_results in 'bssid freq signal flags ssid' format."""
+    code, out, err = _run(["wpa_cli", "-i", iface, "scan"])
+    if code != 0 or "OK" not in out:
+        return -1, "", err or out
+    time.sleep(3.5)
+    return _run(["wpa_cli", "-i", iface, "scan_results"])
+
+
 def scan_networks(iface: str | None = None) -> tuple[list[WiFiNetwork], str]:
     """Scan for available WiFi networks. Returns (networks, error_message)."""
     if iface is None:
@@ -367,6 +396,7 @@ def scan_networks(iface: str | None = None) -> tuple[list[WiFiNetwork], str]:
             candidates.append(ap_iface)
 
     last_error = ""
+    used_wpa_cli = False
     for cand in candidates:
         _run(["iw", "dev", cand, "scan", "flush"])
         time.sleep(0.5)
@@ -379,95 +409,144 @@ def scan_networks(iface: str | None = None) -> tuple[list[WiFiNetwork], str]:
     else:
         if _ap_is_running():
             if _is_dual_channel_mode():
-                return [], f"Scan failed: {last_error}" if last_error else "Scan failed: No networks found"
-            code, out, err = _scan_with_ap_pause(ap_iface)
-            if code != 0 or not out:
-                error = err or out
-                return [], f"Scan failed: {error.strip()}" if error.strip() else "Scan failed after AP pause"
+                code, out, err = _scan_via_wpa_cli(iface)
+                if code == 0 and len(out.strip().split("\n")) > 2:
+                    used_wpa_cli = True
+                else:
+                    code, out, err = _scan_with_ap_pause(ap_iface)
+                    if code != 0 or not out:
+                        error = err or out
+                        return [], f"Scan failed: {error.strip()}" if error.strip() else "Scan failed after AP pause"
+            else:
+                code, out, err = _scan_with_ap_pause(ap_iface)
+                if code != 0 or not out:
+                    error = err or out
+                    return [], f"Scan failed: {error.strip()}" if error.strip() else "Scan failed after AP pause"
         else:
             if "Operation not permitted" in last_error:
                 return [], "Permission denied: run as root to scan WiFi networks"
             return [], f"Scan failed: {last_error}" if last_error else "Scan failed: No networks found"
 
     networks: dict[str, WiFiNetwork] = {}
-    current_bss = ""
-    current_signal = 0
-    current_freq = ""
-    current_ssid = ""
-    current_security = ""
 
-    for line in out.split("\n"):
-        line = line.strip()
-        if line.startswith("BSS "):
-            if current_bss and current_ssid:
-                ch = ""
-                if current_freq:
-                    try:
-                        f = float(current_freq)
-                        if 2412 <= f <= 2484:
-                            ch = str(int((f - 2412) / 5 + 1))
-                        elif 5160 <= f <= 5885:
-                            ch = str(int((f - 5000) / 5))
-                        elif 5925 <= f <= 7125:
-                            ch = str(int((f - 5950) / 5 + 1))
-                    except ValueError:
-                        ch = current_freq
-                networks[current_ssid] = WiFiNetwork(
-                    bssid=current_bss,
-                    ssid=current_ssid,
-                    channel=ch,
-                    frequency=current_freq,
-                    signal=current_signal,
-                    security=current_security,
-                )
-            current_bss = line.split()[1].split("(")[0]
-            current_signal = 0
-            current_freq = ""
-            current_ssid = ""
-            current_security = "Open"
-        elif "signal:" in line:
-            m = re.search(r"signal:\s*(-?\d+\.?\d*)", line)
-            if m:
-                current_signal = int(float(m.group(1)))
-        elif "freq:" in line:
-            m = re.search(r"freq:\s*(\d+)", line)
-            if m:
-                current_freq = m.group(1)
-        elif "SSID:" in line and "SSID hex" not in line:
-            m = re.search(r"SSID:\s*(.*)", line)
-            if m:
-                current_ssid = m.group(1).strip()
-                if not current_ssid:
-                    current_ssid = "<hidden>"
-                elif "\\x" in current_ssid:
-                    try:
-                        current_ssid = current_ssid.encode().decode("unicode_escape")
-                    except (UnicodeDecodeError, UnicodeEncodeError):
-                        pass
-        elif "RSN:" in line:
-            current_security = "WPA2"
-        elif "WPA:" in line:
-            current_security = "WPA"
-
-    if current_bss and current_ssid:
-        ch = ""
-        if current_freq:
+    if used_wpa_cli:
+        for line in out.strip().split("\n"):
+            line = line.strip()
+            if not line or line.startswith("Selected") or line.startswith("bssid") or line.startswith("BSSID"):
+                continue
+            parts = [p for p in line.split("\t") if p]
+            if len(parts) < 5:
+                parts = line.split()
+                if len(parts) < 5:
+                    continue
+            bssid = parts[0]
+            freq = parts[1]
             try:
-                f = float(current_freq)
+                signal = int(float(parts[2]))
+            except ValueError:
+                signal = 0
+            flags = parts[3]
+            ssid = parts[4] if len(parts) > 4 else ""
+            if not ssid:
+                continue
+            security = "Open"
+            if "WPA2" in flags or "RSN" in flags:
+                security = "WPA2"
+            elif "WPA" in flags:
+                security = "WPA"
+            ch = ""
+            try:
+                f = float(freq)
                 if 2412 <= f <= 2484:
                     ch = str(int((f - 2412) / 5 + 1))
                 elif 5160 <= f <= 5885:
                     ch = str(int((f - 5000) / 5))
             except ValueError:
-                ch = current_freq
-        networks[current_ssid] = WiFiNetwork(
-            bssid=current_bss,
-            ssid=current_ssid,
-            channel=ch,
-            frequency=current_freq,
-            signal=current_signal,
-            security=current_security,
-        )
+                pass
+            if ssid not in networks:
+                networks[ssid] = WiFiNetwork(
+                    bssid=bssid, ssid=ssid, channel=ch, frequency=freq,
+                    signal=signal, security=security,
+                )
+    else:
+        current_bss = ""
+        current_signal = 0
+        current_freq = ""
+        current_ssid = ""
+        current_security = ""
+
+        for line in out.split("\n"):
+            line = line.strip()
+            if line.startswith("BSS "):
+                if current_bss and current_ssid:
+                    ch = ""
+                    if current_freq:
+                        try:
+                            f = float(current_freq)
+                            if 2412 <= f <= 2484:
+                                ch = str(int((f - 2412) / 5 + 1))
+                            elif 5160 <= f <= 5885:
+                                ch = str(int((f - 5000) / 5))
+                            elif 5925 <= f <= 7125:
+                                ch = str(int((f - 5950) / 5 + 1))
+                        except ValueError:
+                            ch = current_freq
+                    networks[current_ssid] = WiFiNetwork(
+                        bssid=current_bss,
+                        ssid=current_ssid,
+                        channel=ch,
+                        frequency=current_freq,
+                        signal=current_signal,
+                        security=current_security,
+                    )
+                current_bss = line.split()[1].split("(")[0]
+                current_signal = 0
+                current_freq = ""
+                current_ssid = ""
+                current_security = "Open"
+            elif "signal:" in line:
+                m = re.search(r"signal:\s*(-?\d+\.?\d*)", line)
+                if m:
+                    current_signal = int(float(m.group(1)))
+            elif "freq:" in line:
+                m = re.search(r"freq:\s*(\d+)", line)
+                if m:
+                    current_freq = m.group(1)
+            elif "SSID:" in line and "SSID hex" not in line:
+                m = re.search(r"SSID:\s*(.*)", line)
+                if m:
+                    current_ssid = m.group(1).strip()
+                    if not current_ssid:
+                        current_ssid = "<hidden>"
+                    elif "\\x" in current_ssid:
+                        try:
+                            current_ssid = current_ssid.encode().decode("unicode_escape")
+                        except (UnicodeDecodeError, UnicodeEncodeError):
+                            pass
+            elif "RSN:" in line:
+                current_security = "WPA2"
+            elif "WPA:" in line:
+                current_security = "WPA"
+
+        if current_bss and current_ssid:
+            ch = ""
+            if current_freq:
+                try:
+                    f = float(current_freq)
+                    if 2412 <= f <= 2484:
+                        ch = str(int((f - 2412) / 5 + 1))
+                    elif 5160 <= f <= 5885:
+                        ch = str(int((f - 5000) / 5))
+                except ValueError:
+                    ch = current_freq
+            networks[current_ssid] = WiFiNetwork(
+                bssid=current_bss,
+                ssid=current_ssid,
+                channel=ch,
+                frequency=current_freq,
+                signal=current_signal,
+                security=current_security,
+            )
 
     return sorted(networks.values(), key=lambda n: n.signal, reverse=True), ""
 def _is_dual_channel_mode() -> bool:
@@ -594,6 +673,7 @@ def start_ap(iface: str | None = None, ssid: str = "", password: str = "",
     _stop_hostapd()
     _stop_dnsmasq()
     _run(["systemctl", "stop", "wpa_supplicant"])
+    _run(["systemctl", "stop", "wpa_supplicant.socket"])
     time.sleep(0.5)
 
     sta_cfg = get_configured_sta_iface()
@@ -683,6 +763,8 @@ def start_ap(iface: str | None = None, ssid: str = "", password: str = "",
     _save_ap_state(_ssid, _password, _channel)
 
     tag = " (dual-mode)" if use_virtual else ""
+    if use_virtual and _is_dual_channel_mode():
+        tag = " (dual-mode, dual-channel)"
     return True, f"AP '{_ssid}' started on {ap_iface}{tag}"
 
 
@@ -904,8 +986,9 @@ def connect_to_wifi(ssid: str, password: str = "",
         return False, "No wireless interface found"
 
     # Kill any running wpa_supplicant instances
-    _run(["pkill", "-9", "-f", "wpa_supplicant"])
     _run(["systemctl", "stop", "wpa_supplicant"])
+    _run(["systemctl", "stop", "wpa_supplicant.socket"])
+    _run(["pkill", "-9", "-f", "wpa_supplicant"])
     time.sleep(1)
 
     # Reset interface to managed mode (don't touch virtual AP)
@@ -929,7 +1012,7 @@ def connect_to_wifi(ssid: str, password: str = "",
 
     # Start wpa_supplicant
     wpacode, _, wpaerr = _run([
-        "wpa_supplicant", "-B", "-i", iface,
+        "wpa_supplicant", "-B", "-i", iface, "-D", "nl80211",
         "-c", WPASUPPLICANT_CONFIG_PATH
     ])
     if wpacode != 0:
@@ -955,6 +1038,7 @@ def disconnect_wifi(iface: str | None = None) -> tuple[bool, str]:
     _run(["dhclient", "-r", iface])
     _run(["ip", "addr", "flush", "dev", iface])
     _run(["systemctl", "start", "wpa_supplicant"])
+    _run(["systemctl", "start", "wpa_supplicant.socket"])
     return True, "Disconnected"
 
 
@@ -1048,7 +1132,7 @@ def _generate_hostapd_config(iface: str, ssid: str, password: str, channel: int)
 def _generate_wpa_config(ssid: str, password: str, frequency: str = "") -> str:
     """Generate wpa_supplicant configuration file content."""
     lines = [
-        "ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev",
+        "ctrl_interface=/var/run/wpa_supplicant",
         "update_config=1",
         "country=US",
     ]
