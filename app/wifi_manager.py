@@ -77,6 +77,13 @@ def _systemctl(*args: str) -> None:
         subprocess.run(["systemctl", *args], capture_output=True, timeout=10)
 
 
+def _nm_unmanage(iface: str) -> None:
+    """Tell NetworkManager to stop managing an interface."""
+    _run(["nmcli", "dev", "set", iface, "managed", "no"])
+    # Also try 'unmanage' via dbus if nmcli not available
+    _run(["nmcli", "device", "disconnect", iface])
+
+
 def detect_wireless_radios() -> dict:
     """Detect all wireless radios (PHYs) and their capabilities.
 
@@ -122,8 +129,25 @@ def detect_wireless_radios() -> dict:
             driver = m.group(1)
 
         _, phy_dump, _ = _run(["iw", phy_name, "info"])
-        supports_ap = "AP" in phy_dump
-        supports_station = "managed" in phy_dump.lower() or "station" in phy_dump.lower()
+
+        in_modes = False
+        _ap = False
+        _sta = False
+        for line in phy_dump.split("\n"):
+            if "Supported interface modes" in line:
+                in_modes = True
+                continue
+            if in_modes:
+                s = line.strip()
+                if not s or not s.startswith("*"):
+                    break
+                m = s.lstrip("*").strip()
+                if m in ("AP", "AP/VLAN"):
+                    _ap = True
+                if m == "managed":
+                    _sta = True
+        supports_ap = _ap
+        supports_station = _sta
 
         supports_dual = supports_ap and supports_station and len(ifaces) > 1
         if not supports_dual:
@@ -141,7 +165,7 @@ def detect_wireless_radios() -> dict:
         if "valid interface combinations" in phy_dump:
             section = phy_dump.split("valid interface combinations:")[1]
             section = section[:section.find("\n\n")] if "\n\n" in section else section
-            if ("AP" in section or "ap" in section) and ("managed" in section.lower() or "station" in section.lower()):
+            if re.search(r'\bAP\b', section) and re.search(r'\bmanaged\b', section):
                 if "#channels <= 2" in section:
                     supports_dual_channel = True
 
@@ -254,8 +278,22 @@ def get_interface_capabilities(iface: str | None = None) -> InterfaceCapabilitie
     if phy_name:
         _, modes_out, _ = _run(["iw", phy_name, "info"])
 
-    supports_ap = "AP" in modes_out or "ap" in modes_out.lower()
-    supports_station = "managed" in modes_out.lower() or "station" in modes_out.lower()
+    supports_ap = False
+    supports_station = False
+    in_modes_section = False
+    for line in modes_out.split("\n"):
+        if "Supported interface modes" in line:
+            in_modes_section = True
+            continue
+        if in_modes_section:
+            stripped = line.strip()
+            if not stripped or not stripped.startswith("*"):
+                break
+            mode = stripped.lstrip("*").strip()
+            if mode in ("AP", "AP/VLAN"):
+                supports_ap = True
+            if mode == "managed":
+                supports_station = True
 
     # Check for multi-interface support (dual mode)
     supports_dual = False
@@ -637,6 +675,24 @@ def get_wifi_status(iface: str | None = None) -> WiFiStatus:
     return status
 
 
+def get_hostapd_status() -> dict:
+    """Get hostapd process status."""
+    _, pid_out, _ = _run(["pgrep", "-f", f"hostapd.*{HOSTAPD_CONFIG_PATH}"])
+    pid = pid_out.strip()
+    if not pid:
+        return {"running": False, "pid": 0, "config": "", "uptime": ""}
+    pid = pid.split("\n")[0]
+    _, uptime_out, _ = _run(["ps", "-o", "etime=", "-p", pid])
+    uptime = uptime_out.strip()
+    config = ""
+    try:
+        with open(HOSTAPD_CONFIG_PATH) as f:
+            config = f.read()
+    except OSError:
+        pass
+    return {"running": True, "pid": int(pid), "config": config, "uptime": uptime}
+
+
 def _get_phy(iface: str) -> str:
     """Get the phy name for an interface."""
     _, info, _ = _run(["iw", iface, "info"])
@@ -675,24 +731,40 @@ def start_ap(iface: str | None = None, ssid: str = "", password: str = "",
     _password = password or AP_PASSWORD
     _channel = channel if channel > 0 else AP_CHANNEL
 
-    # Stop any existing services
+    # Stop any existing AP services
     _stop_hostapd()
     _stop_dnsmasq()
-    _systemctl("stop", "wpa_supplicant")
-    _systemctl("stop", "wpa_supplicant.socket")
     time.sleep(0.5)
 
     sta_cfg = get_configured_sta_iface()
     is_dual_nic = bool(sta_cfg and sta_cfg != iface and os.path.exists(f"/sys/class/net/{sta_cfg}"))
     ap_iface = iface
 
+    # Only stop wpa_supplicant globally if NOT dual-NIC (preserve STA on other adapter)
+    if not is_dual_nic:
+        _systemctl("stop", "wpa_supplicant")
+        _systemctl("stop", "wpa_supplicant.socket")
+        time.sleep(0.5)
+
+    caps = get_interface_capabilities(iface)
+    if caps is not None and not caps.supports_ap:
+        return False, f"Interface {iface} does not support AP mode (driver: {caps.driver}). Use a WiFi adapter that supports AP/Master mode."
+
     if is_dual_nic:
         use_virtual = False
     else:
-        caps = get_interface_capabilities(iface)
         use_virtual = dual and caps is not None and caps.supports_dual
         if dual and not use_virtual:
             return False, "Dual mode requested but not supported by this interface"
+
+    # Tell NetworkManager to stop managing this interface
+    _nm_unmanage(iface)
+    time.sleep(0.5)
+
+    # Check rfkill — ensure wireless is not blocked
+    _, rfkill_out, _ = _run(["rfkill", "list", iface])
+    if "Soft blocked: yes" in rfkill_out or "Hard blocked: yes" in rfkill_out:
+        return False, f"Interface {iface} is rfkill blocked: {rfkill_out.strip()}"
 
     if use_virtual:
         phy = _get_phy(iface)
@@ -1113,6 +1185,7 @@ def _generate_hostapd_config(iface: str, ssid: str, password: str, channel: int)
             pass
     lines = [
         f"interface={iface}",
+        "driver=nl80211",
         f"ssid={ssid}",
         f"channel={channel}",
         f"hw_mode={'a' if channel > 14 else 'g'}",

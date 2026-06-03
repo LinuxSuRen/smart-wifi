@@ -8,6 +8,7 @@ from app.config import (AP_CHANNEL, AP_IP, AP_NETMASK, AP_PASSWORD, AP_SSID,
 from app.wifi_manager import (WiFiNetwork, WiFiStatus, RadioInfo,
                                connect_to_wifi, disconnect_wifi,
                                get_ap_clients, get_blacklist,
+                               get_hostapd_status,
                                kick_client, blacklist_client, unblacklist_client,
                                get_interface_capabilities, get_wifi_status,
                                get_network_interfaces,
@@ -64,7 +65,8 @@ def create_app() -> Flask:
         password = data.get("password", "")
         channel = data.get("channel", 0)
         dual = data.get("dual", True)
-        ok, msg = start_ap(ssid=ssid, password=password, channel=channel, dual=dual)
+        iface = data.get("iface")
+        ok, msg = start_ap(iface=iface, ssid=ssid, password=password, channel=channel, dual=dual)
         return jsonify({"ok": ok, "message": msg})
 
     @app.route("/api/ap/stop", methods=["POST"])
@@ -181,6 +183,10 @@ def create_app() -> Flask:
             return jsonify({"ok": False, "message": "MAC address required"}), 400
         ok, msg = unblacklist_client(mac)
         return jsonify({"ok": ok, "message": msg})
+
+    @app.route("/api/ap/hostapd-status")
+    def api_hostapd_status():
+        return jsonify(get_hostapd_status())
 
     @app.route("/api/ap/blacklist")
     def api_get_blacklist():

@@ -137,6 +137,12 @@ input:focus,select:focus{outline:none;border-color:#3b82f6}
       <form id="apForm" onsubmit="startAp(event)">
         <div class="grid2">
           <div class="form-group">
+            <label>Wireless Interface (AP)</label>
+            <select id="apInterface">
+              <option value="">Auto-detect</option>
+            </select>
+          </div>
+          <div class="form-group">
             <label>Mode</label>
             <select id="apMode">
               <option value="dual">AP + WiFi (dual-mode, scan while AP running)</option>
@@ -195,6 +201,16 @@ input:focus,select:focus{outline:none;border-color:#3b82f6}
         </div>
       </form>
       <div id="apStatus" style="margin-top:12px;font-size:.85rem"></div>
+    </div>
+    <div class="card" id="hostapdCard" style="display:none">
+      <h2 style="display:flex;justify-content:space-between;align-items:center">
+        hostapd Status
+        <span>
+          <button class="btn btn-primary btn-sm" onclick="loadHostapdStatus()" id="btnRefreshHostapd" style="padding:2px 10px;font-size:.75rem">Refresh</button>
+          <button class="btn btn-danger btn-sm" onclick="stopAp()" style="padding:2px 10px;font-size:.75rem">Stop</button>
+        </span>
+      </h2>
+      <div id="hostapdContent">Loading...</div>
     </div>
   </div>
 
@@ -309,6 +325,9 @@ async function loadStatus() {
       if (tags.length) document.getElementById('sysSubtitle').innerHTML = sub + ' | ' + tags.join(' ');
     }
   } catch(e) {}
+  if (document.getElementById('panelAp').style.display !== 'none') {
+    loadHostapdStatus();
+  }
 }
 
 function stat(label, value) {
@@ -420,8 +439,33 @@ async function loadApState() {
   } catch(e) {}
 }
 
+async function loadApInterfaces() {
+  try {
+    var data = await fetchJSON(API + '/radios/detect');
+    if (!data.ok || !data.radios) return;
+    var sel = document.getElementById('apInterface');
+    sel.innerHTML = '';
+    var apCapable = data.radios.filter(function(r) { return r.supports_ap; });
+    if (apCapable.length === 0) {
+      sel.innerHTML = '<option value="">No AP-capable adapter found</option>';
+      return;
+    }
+    apCapable.forEach(function(r, i) {
+      var label = r.iface + ' (' + r.phy + ', ' + r.driver + ')';
+      if (r.supports_dual) label += ' [dual]';
+      var selAttr = i === 0 ? ' selected' : '';
+      sel.innerHTML += '<option value="' + r.iface + '"' + selAttr + '>' + label + '</option>';
+    });
+    // If multiple adapters, auto-set STA to non-AP one
+    if (data.radios.length > 1 && data.configured) {
+      sel.value = data.ap_iface;
+    }
+  } catch(e) {}
+}
+
 async function startAp(e) {
   e.preventDefault();
+  const iface = document.getElementById('apInterface').value || undefined;
   const ssid = document.getElementById('apSsid').value;
   const pwd = document.getElementById('apPassword').value;
   const ch = parseInt(document.getElementById('apChannel').value);
@@ -441,18 +485,62 @@ async function startAp(e) {
       body: JSON.stringify(configData)
     });
   }
+  // If multiple radios, save AP/STA assignment
+  if (iface) {
+    try {
+      var rd = await fetchJSON(API + '/radios/detect');
+      if (rd.ok && rd.radios && rd.radios.length > 1) {
+        var staIface = rd.radios.filter(function(r) { return r.iface !== iface; })[0];
+        if (staIface) {
+          await fetchJSON(API + '/radios/configure', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ap_iface: iface, sta_iface: staIface.iface})
+          });
+        }
+      }
+    } catch(e) {}
+  }
   const data = await fetchJSON(API + '/ap/start', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ssid, password: pwd, channel: ch, dual: dual})
+    body: JSON.stringify({iface: iface, ssid, password: pwd, channel: ch, dual: dual})
   });
   showToast(data.message, data.ok);
-  if (data.ok) setTimeout(loadStatus, 1500);
+  if (data.ok) {
+    setTimeout(loadStatus, 1500);
+    setTimeout(loadHostapdStatus, 1500);
+  }
 }
+async function loadHostapdStatus() {
+  try {
+    var data = await fetchJSON(API + '/ap/hostapd-status');
+    var card = document.getElementById('hostapdCard');
+    var content = document.getElementById('hostapdContent');
+    if (data.running) {
+      card.style.display = 'block';
+      content.innerHTML =
+        '<div class="grid2">' +
+        stat('Status', badgeHtml('Running', 'green')) +
+        stat('PID', data.pid) +
+        stat('Uptime', data.uptime || '-') +
+        '</div>' +
+        '<div style="margin-top:8px"><label style="font-size:.8rem;color:#94a3b8">Config:</label>' +
+        '<pre style="background:#0f172a;padding:8px;border-radius:6px;font-size:.75rem;margin-top:4px;overflow-x:auto">' +
+        escapeHtml(data.config) + '</pre></div>';
+    } else {
+      card.style.display = 'none';
+    }
+  } catch(e) { /* ignore */ }
+}
+
 async function stopAp() {
   const data = await fetchJSON(API + '/ap/stop', {method: 'POST'});
   showToast(data.message, data.ok);
-  if (data.ok) setTimeout(loadStatus, 1500);
+  if (data.ok) {
+    setTimeout(loadStatus, 1500);
+    setTimeout(loadHostapdStatus, 1500);
+  }
 }
 
 async function resetWireless() {
@@ -494,7 +582,9 @@ document.getElementById('tabStation').onclick = function() {
 document.getElementById('tabAp').onclick = function() {
   switchTab('ap');
   loadApState();
+  loadApInterfaces();
   loadStatus();
+  loadHostapdStatus();
 };
 document.getElementById('tabClients').onclick = function() {
   switchTab('clients');
