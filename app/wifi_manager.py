@@ -71,6 +71,12 @@ def _run(cmd: list[str], timeout: int = 15) -> tuple[int, str, str]:
         return -2, "", "timeout"
 
 
+def _systemctl(*args: str) -> None:
+    """Run systemctl if available (works in container or host)."""
+    if os.path.exists("/usr/bin/systemctl") or os.path.exists("/bin/systemctl"):
+        subprocess.run(["systemctl", *args], capture_output=True, timeout=10)
+
+
 def detect_wireless_radios() -> dict:
     """Detect all wireless radios (PHYs) and their capabilities.
 
@@ -672,8 +678,8 @@ def start_ap(iface: str | None = None, ssid: str = "", password: str = "",
     # Stop any existing services
     _stop_hostapd()
     _stop_dnsmasq()
-    _run(["systemctl", "stop", "wpa_supplicant"])
-    _run(["systemctl", "stop", "wpa_supplicant.socket"])
+    _systemctl("stop", "wpa_supplicant")
+    _systemctl("stop", "wpa_supplicant.socket")
     time.sleep(0.5)
 
     sta_cfg = get_configured_sta_iface()
@@ -986,8 +992,8 @@ def connect_to_wifi(ssid: str, password: str = "",
         return False, "No wireless interface found"
 
     # Kill any running wpa_supplicant instances
-    _run(["systemctl", "stop", "wpa_supplicant"])
-    _run(["systemctl", "stop", "wpa_supplicant.socket"])
+    _systemctl("stop", "wpa_supplicant")
+    _systemctl("stop", "wpa_supplicant.socket")
     _run(["pkill", "-9", "-f", "wpa_supplicant"])
     time.sleep(1)
 
@@ -1037,8 +1043,8 @@ def disconnect_wifi(iface: str | None = None) -> tuple[bool, str]:
     _run(["pkill", "-f", f"wpa_supplicant.*{iface}"])
     _run(["dhclient", "-r", iface])
     _run(["ip", "addr", "flush", "dev", iface])
-    _run(["systemctl", "start", "wpa_supplicant"])
-    _run(["systemctl", "start", "wpa_supplicant.socket"])
+    _systemctl("start", "wpa_supplicant")
+    _systemctl("start", "wpa_supplicant.socket")
     return True, "Disconnected"
 
 
