@@ -490,17 +490,15 @@ async function startAp(e) {
   const dhcpEnd = document.getElementById('apDhcpEnd').value.trim();
   const dual = document.getElementById('apMode').value === 'dual';
   // Save settings before starting AP
-  var configData = {};
-  if (captive) configData.captive_portal_url = captive;
-  if (dhcpStart) configData.dhcp_start = dhcpStart;
-  if (dhcpEnd) configData.dhcp_end = dhcpEnd;
-  if (Object.keys(configData).length > 0) {
-    await fetchJSON(API + '/config', {
-      method: 'PUT',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(configData)
-    });
-  }
+  await fetchJSON(API + '/config', {
+    method: 'PUT',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      captive_portal_url: captive,
+      dhcp_start: dhcpStart || undefined,
+      dhcp_end: dhcpEnd || undefined,
+    })
+  });
   // If multiple radios, save AP/STA assignment
   if (iface) {
     try {
@@ -657,6 +655,7 @@ document.getElementById('tabConfig').onclick = function() {
   loadConfig();
 };
 function switchTab(t) {
+  localStorage.setItem('activeTab', t);
   ['Station','Ap','Clients','Interfaces','Config'].forEach(function(name) {
     var panel = document.getElementById('panel' + name);
     var tab = document.getElementById('tab' + name);
@@ -800,6 +799,13 @@ loadScanInterfaces();
 loadDeps();
 checkRadioConfig();
 setInterval(loadStatus, 10000);
+
+// Restore last active tab after page refresh
+var savedTab = localStorage.getItem('activeTab');
+if (savedTab && savedTab !== 'station') {
+  var tabBtn = document.getElementById('tab' + savedTab.charAt(0).toUpperCase() + savedTab.slice(1));
+  if (tabBtn) tabBtn.click();
+}
 
 async function loadScanInterfaces() {
   try {

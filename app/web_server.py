@@ -304,12 +304,10 @@ def create_app() -> Flask:
         if not captive_url:
             return None
         path = request.path
-        host = request.host.split(":")[0]
         if path.startswith("/api/") or path.startswith("/captive") or path == "/":
             return None
-        if host in ("localhost", "127.0.0.1", AP_IP, "0.0.0.0"):
-            return None
-        return f'<html><head><meta http-equiv="refresh" content="0;url={captive_url}"></head><body>Redirecting to <a href="{captive_url}">{captive_url}</a></body></html>', 200
+        from flask import redirect
+        return redirect(captive_url, code=302)
 
     return app
 

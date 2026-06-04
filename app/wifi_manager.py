@@ -856,17 +856,14 @@ def _cleanup_virtual(virtual_iface: str | None):
 
 def _setup_captive_portal(ap_iface: str):
     """Redirect HTTP traffic to the Flask server for captive portal."""
+    _teardown_captive_portal()
     url = _get_captive_portal_url()
     if not url:
         return
     # DNAT: redirect port 80 on the AP interface to Flask port
-    code, _, _ = _run(["iptables", "-t", "nat", "-C", "PREROUTING",
-                       "-i", ap_iface, "-p", "tcp", "--dport", "80",
-                       "-j", "REDIRECT", "--to-port", str(WEB_PORT)])
-    if code != 0:
-        _run(["iptables", "-t", "nat", "-A", "PREROUTING",
-              "-i", ap_iface, "-p", "tcp", "--dport", "80",
-              "-j", "REDIRECT", "--to-port", str(WEB_PORT)])
+    _run(["iptables", "-t", "nat", "-A", "PREROUTING",
+          "-i", ap_iface, "-p", "tcp", "--dport", "80",
+          "-j", "REDIRECT", "--to-port", str(WEB_PORT)])
 
 
 def _teardown_captive_portal():
@@ -1150,15 +1147,16 @@ def _stop_dnsmasq():
 def _start_dnsmasq(iface: str) -> tuple[bool, str]:
     """Start dnsmasq as DHCP server for AP mode. Returns (ok, message)."""
     dhcp = _get_dhcp_settings()
+    captive_url = _get_captive_portal_url()
     dnsmasq_conf = (
         f"interface={iface}\n"
         f"dhcp-range={dhcp['start']},{dhcp['end']},255.255.255.0,12h\n"
         f"dhcp-option=3,{AP_IP}\n"
         f"dhcp-option=6,{AP_IP}\n"
         f"dhcp-leasefile={DNSMASQ_LEASE_PATH}\n"
-        f"no-resolv\n"
-        f"address=/#/{AP_IP}\n"
     )
+    if captive_url:
+        dnsmasq_conf += f"no-resolv\naddress=/#/{AP_IP}\n"
     try:
         os.remove(DNSMASQ_CONFIG_PATH)
     except OSError:
