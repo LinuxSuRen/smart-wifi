@@ -46,6 +46,45 @@ install_deps() {
     echo "=== Dependencies installed ==="
 }
 
+PIDFILE="/var/run/smart-wifi.pid"
+MAX_RESTART_DELAY=30
+
+_cleanup() {
+    echo "Shutting down Smart WiFi Manager..."
+    if [ -f "$PIDFILE" ]; then
+        pid=$(cat "$PIDFILE" 2>/dev/null)
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            kill "$pid" 2>/dev/null
+            # Give it up to 10 seconds to shut down gracefully
+            for i in $(seq 1 10); do
+                kill -0 "$pid" 2>/dev/null || break
+                sleep 1
+            done
+            # Force kill if still running
+            kill -9 "$pid" 2>/dev/null || true
+        fi
+        rm -f "$PIDFILE"
+    fi
+    echo "Smart WiFi Manager stopped."
+}
+
+_start() {
+    export WIFI_INTERFACE="${WIFI_INTERFACE:-wlp2s0}"
+    export WEB_HOST="0.0.0.0"
+    export WEB_PORT="${WEB_PORT:-8080}"
+    mkdir -p /var/lib/smart-wifi
+
+    if [ -f venv/bin/activate ]; then
+        . venv/bin/activate
+    fi
+
+    echo "Starting Smart WiFi Manager process..."
+    python3 main.py &
+    echo $! > "$PIDFILE"
+    wait $!
+    return $?
+}
+
 case "$MODE" in
     local)
         echo "=== Starting Smart WiFi Manager (local) ==="
@@ -59,16 +98,29 @@ case "$MODE" in
             export WIFI_INTERFACE="${WIFI_INTERFACE:-wlp2s0}"
             export WEB_HOST="0.0.0.0"
             export WEB_PORT="${WEB_PORT:-8080}"
-            exec sudo WIFI_INTERFACE="$WIFI_INTERFACE" WEB_HOST="$WEB_HOST" WEB_PORT="$WEB_PORT" PYTHONPATH="$HOME/.local/lib/python$(python3 -c 'import sys;print(sys.version_info.major,sys.version_info.minor,sep=".")')/site-packages:${PYTHONPATH:-}" "$SCRIPT_DIR/run.sh" local
+            exec sudo WIFI_INTERFACE="$WIFI_INTERFACE" WEB_HOST="$WEB_HOST" WEB_PORT="$WEB_PORT" "$SCRIPT_DIR/run.sh" local
         fi
-        export WIFI_INTERFACE="${WIFI_INTERFACE:-wlp2s0}"
-        export WEB_HOST="0.0.0.0"
-        export WEB_PORT="${WEB_PORT:-8080}"
-        mkdir -p /var/lib/smart-wifi
-        if [ -f venv/bin/activate ]; then
-            . venv/bin/activate
-        fi
-        exec python3 main.py 2>>/var/lib/smart-wifi/smart-wifi-server.log
+
+        trap _cleanup EXIT SIGTERM SIGINT
+
+        delay=1
+        while true; do
+            _start
+            exit_code=$?
+            echo "Process exited with code $exit_code" >&2
+
+            # Exit codes: 0 = normal shutdown, 130/143 = SIGINT/SIGTERM
+            if [ "$exit_code" -eq 0 ] || [ "$exit_code" -eq 130 ] || [ "$exit_code" -eq 143 ]; then
+                echo "Normal shutdown requested, exiting." >&2
+                break
+            fi
+
+            echo "Restarting in ${delay}s..." >&2
+            sleep "$delay"
+            # Exponential backoff up to MAX_RESTART_DELAY
+            delay=$((delay * 2))
+            [ "$delay" -gt "$MAX_RESTART_DELAY" ] && delay=$MAX_RESTART_DELAY
+        done
         ;;
     docker)
         echo "=== Starting Smart WiFi Manager (docker, privileged) ==="

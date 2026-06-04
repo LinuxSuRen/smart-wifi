@@ -1,12 +1,25 @@
 import json
 import os
 import sys
+import signal
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from app.web_server import create_app
 from app.config import WEB_HOST, WEB_PORT, AP_STATE_FILE, ensure_data_dir
 from app.wifi_manager import cleanup_wireless, restore_ap_state, _ap_is_running, get_wifi_status
+
+should_stop = False
+
+
+def _handle_signal(signum, frame):
+    global should_stop
+    should_stop = True
+    print(f"Received signal {signum}, shutting down...")
+
+
+signal.signal(signal.SIGTERM, _handle_signal)
+signal.signal(signal.SIGINT, _handle_signal)
 
 ensure_data_dir()
 app = create_app()
@@ -35,4 +48,5 @@ if __name__ == "__main__":
             ok2, msg2 = result
             print(f"Restored AP: {msg2}")
 
-    app.run(host=WEB_HOST, port=WEB_PORT, debug=False)
+    from waitress import serve
+    serve(app, host=WEB_HOST, port=WEB_PORT, _quiet=True)
