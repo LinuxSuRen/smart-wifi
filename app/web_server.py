@@ -1,14 +1,23 @@
 import json as _json
+import logging
 import os
 import subprocess
 import sys
 
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, jsonify, render_template, request, session
+
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    stream=sys.stderr,
+)
+_log = logging.getLogger("web_server")
 
 from app.config import (AP_CHANNEL, AP_IP, AP_NETMASK, AP_PASSWORD, AP_SSID,
                         CAPTIVE_PORTAL_URL, WIFI_INTERFACE, WEB_HOST, WEB_PORT,
                         AP_STATE_FILE, AP_DHCP_START, AP_DHCP_END,
-                        DATA_DIR, SERVICE_FILE)
+                        DATA_DIR, SERVICE_FILE, SECRET_KEY)
 from app.wifi_manager import (WiFiNetwork, WiFiStatus, RadioInfo,
                                connect_to_wifi, disconnect_wifi,
                                get_ap_clients, get_blacklist,
@@ -24,12 +33,80 @@ from app.wifi_manager import (WiFiNetwork, WiFiStatus, RadioInfo,
 from app.config import save_radio_config
 
 
+import ctypes
+_libcrypt = ctypes.CDLL("libcrypt.so.1")
+_libcrypt.crypt.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
+_libcrypt.crypt.restype = ctypes.c_char_p
+
+
+def _unix_crypt(password: str, salt: str) -> str:
+    result = _libcrypt.crypt(password.encode(), salt.encode())
+    return result.decode() if result else ""
+
+
+def _check_auth(username: str, password: str) -> bool:
+    """Authenticate against Linux system user (root can read /etc/shadow directly)."""
+    fallback_pwd = os.environ.get("AUTH_PASSWORD", "")
+    if fallback_pwd and password == fallback_pwd:
+        _log.info("Auth success (env fallback) for user=%s", username)
+        return True
+
+    # Read shadow entry directly (requires root)
+    try:
+        with open("/etc/shadow") as f:
+            for line in f:
+                parts = line.split(":")
+                if parts[0] == username:
+                    pw_hash = parts[1]
+                    if pw_hash in ("", "*", "!", "!!"):
+                        _log.warning("Auth failed for user=%s: account has no password or is locked", username)
+                        return False
+                    if _unix_crypt(password, pw_hash) == pw_hash:
+                        _log.info("Auth success (shadow) for user=%s", username)
+                        return True
+                    _log.warning("Auth failed (shadow) for user=%s: password mismatch", username)
+                    return False
+    except OSError as e:
+        _log.error("Cannot read /etc/shadow for user=%s: %s", username, e)
+
+    _log.warning("Auth failed for user=%s: not found or system error", username)
+    return False
+
+
 def create_app() -> Flask:
     app = Flask(__name__)
+    app.secret_key = SECRET_KEY
 
     @app.route("/")
     def index():
+        if not session.get("authenticated"):
+            return render_template("login.html")
         return render_template("index.html")
+
+    @app.route("/api/auth/status")
+    def api_auth_status():
+        return jsonify({
+            "authenticated": session.get("authenticated", False),
+            "username": session.get("username", ""),
+        })
+
+    @app.route("/api/login", methods=["POST"])
+    def api_login():
+        data = request.get_json(silent=True) or {}
+        username = data.get("username", "")
+        password = data.get("password", "")
+        if not username or not password:
+            return jsonify({"ok": False, "message": "Username and password required"}), 400
+        if _check_auth(username, password):
+            session["authenticated"] = True
+            session["username"] = username
+            return jsonify({"ok": True, "message": "Login successful"})
+        return jsonify({"ok": False, "message": "Invalid username or password"}), 401
+
+    @app.route("/api/logout", methods=["POST"])
+    def api_logout():
+        session.clear()
+        return jsonify({"ok": True, "message": "Logged out"})
 
     @app.route("/api/status")
     def api_status():
@@ -290,6 +367,15 @@ def create_app() -> Flask:
                 return jsonify({"ok": True, "message": "Auto-start disabled"})
             except OSError as e:
                 return jsonify({"ok": False, "message": f"Failed to remove service file: {e}"}), 500
+
+    @app.before_request
+    def _check_api_auth():
+        if request.path.startswith("/api/"):
+            if request.path in ("/api/auth/status", "/api/login", "/api/logout"):
+                return None
+            if not session.get("authenticated"):
+                return jsonify({"ok": False, "message": "Authentication required"}), 401
+        return None
 
     @app.before_request
     def _captive_portal_intercept():

@@ -1,6 +1,12 @@
 import json as _json
 import os
+import secrets
 
+SECRET_KEY = os.environ.get("SECRET_KEY", secrets.token_hex(32))
+PAM_SERVICE = os.environ.get("PAM_SERVICE", "login")
+
+WEB_HOST = os.environ.get("WEB_HOST", "0.0.0.0")
+WEB_PORT = int(os.environ.get("WEB_PORT", "8080"))
 WIFI_INTERFACE = os.environ.get("WIFI_INTERFACE", "wlp2s0")
 AP_SSID = os.environ.get("AP_SSID", "SmartWiFi-AP")
 AP_PASSWORD = os.environ.get("AP_PASSWORD", "smartwifi123")
@@ -9,9 +15,6 @@ AP_IP = os.environ.get("AP_IP", "192.168.4.1")
 AP_NETMASK = os.environ.get("AP_NETMASK", "24")
 AP_DHCP_START = os.environ.get("AP_DHCP_START", "192.168.4.2")
 AP_DHCP_END = os.environ.get("AP_DHCP_END", "192.168.4.100")
-
-WEB_HOST = os.environ.get("WEB_HOST", "0.0.0.0")
-WEB_PORT = int(os.environ.get("WEB_PORT", "8080"))
 CAPTIVE_PORTAL_URL = os.environ.get("CAPTIVE_PORTAL_URL", "")
 
 DATA_DIR = os.environ.get("DATA_DIR", "/var/lib/smart-wifi")

@@ -90,7 +90,10 @@ input:focus,select:focus{outline:none;border-color:#3b82f6}
 </head>
 <body>
 <div class="container">
-  <h1>Smart WiFi Manager</h1>
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+    <h1 style="margin:0">Smart WiFi Manager</h1>
+    <span id="userBadge" style="font-size:.8rem;color:#94a3b8"></span>
+  </div>
   <p class="subtitle" id="sysSubtitle">Loading...</p>
 
   <div class="card">
@@ -310,6 +313,22 @@ function showToast(msg, ok) {
 async function fetchJSON(url, opts) {
   const r = await fetch(url, opts);
   return r.json();
+}
+
+// --- Auth ---
+async function loadUserInfo() {
+  try {
+    var data = await fetchJSON(API + '/auth/status');
+    if (data.authenticated && data.username) {
+      document.getElementById('userBadge').innerHTML = escapeHtml(data.username) +
+        ' | <a href="#" onclick="doLogout();return false" style="color:#fca5a5;text-decoration:none">Logout</a>';
+    }
+  } catch(e) {}
+}
+
+async function doLogout() {
+  await fetchJSON(API + '/logout', {method: 'POST'});
+  location.reload();
 }
 
 // --- Status ---
@@ -846,6 +865,7 @@ loadStatus();
 loadScanInterfaces();
 loadDeps();
 checkRadioConfig();
+loadUserInfo();
 setInterval(loadStatus, 10000);
 
 // Restore last active tab after page refresh

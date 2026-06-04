@@ -36,9 +36,12 @@ install_deps() {
         echo "  hostapd, dnsmasq, iw, wpasupplicant, dhclient, iproute2, python3"
     fi
 
-    echo "=== Installing Python dependencies ==="
-    pip3 install -r requirements.txt --break-system-packages 2>/dev/null || \
-        pip3 install -r requirements.txt
+    echo "=== Setting up Python virtual environment ==="
+    if [ ! -d venv ]; then
+        python3 -m venv venv
+    fi
+    source venv/bin/activate
+    pip install -r requirements.txt
 
     echo "=== Dependencies installed ==="
 }
@@ -62,6 +65,9 @@ case "$MODE" in
         export WEB_HOST="0.0.0.0"
         export WEB_PORT="${WEB_PORT:-8080}"
         mkdir -p /var/lib/smart-wifi
+        if [ -f venv/bin/activate ]; then
+            . venv/bin/activate
+        fi
         exec python3 main.py 2>>/var/lib/smart-wifi/smart-wifi-server.log
         ;;
     docker)
