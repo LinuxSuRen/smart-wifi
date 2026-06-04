@@ -9,10 +9,11 @@ from dataclasses import dataclass, field, asdict
 from app.config import (
     AP_CHANNEL, AP_DHCP_END, AP_DHCP_START, AP_IP, AP_NETMASK,
     AP_PASSWORD, AP_SSID, AP_STATE_FILE, BLACKLIST_FILE, CAPTIVE_PORTAL_URL,
-    DNSMASQ_CONFIG_PATH, DNSMASQ_PID_PATH, HOSTAPD_CONFIG_PATH,
+    DNSMASQ_CONFIG_PATH, DNSMASQ_PID_PATH, DNSMASQ_LEASE_PATH,
+    HOSTAPD_CONFIG_PATH, HOSTAPD_PID_PATH,
     WIFI_INTERFACE, WPASUPPLICANT_CONFIG_PATH, WEB_PORT,
     get_configured_ap_iface, get_configured_sta_iface, load_radio_config,
-    save_radio_config, RADIO_CONFIG_FILE,
+    save_radio_config, RADIO_CONFIG_FILE, DATA_DIR, ensure_data_dir,
 )
 
 
@@ -370,7 +371,7 @@ def get_interface_capabilities(iface: str | None = None) -> InterfaceCapabilitie
 
 def _ap_is_running() -> bool:
     """Check if hostapd is running."""
-    if os.path.exists("/tmp/smart-wifi-hostapd.pid"):
+    if os.path.exists(HOSTAPD_PID_PATH):
         return True
     return subprocess.run(["pidof", "hostapd"], capture_output=True).returncode == 0
 
@@ -813,14 +814,14 @@ def start_ap(iface: str | None = None, ssid: str = "", password: str = "",
         f.write(hostapd_conf)
 
     # Start hostapd
-    code, out, err = _run(["hostapd", "-B", HOSTAPD_CONFIG_PATH])
+    code, out, err = _run(["hostapd", "-B", "-P", HOSTAPD_PID_PATH, HOSTAPD_CONFIG_PATH])
     if code != 0:
         error_detail = (err or out).strip()
         if "Name not unique" in error_detail and use_virtual:
             _run(["ip", "link", "set", ap_iface, "down"])
             _run(["iw", "dev", ap_iface, "del"])
             time.sleep(0.5)
-            code, out, err = _run(["hostapd", "-B", HOSTAPD_CONFIG_PATH])
+            code, out, err = _run(["hostapd", "-B", "-P", HOSTAPD_PID_PATH, HOSTAPD_CONFIG_PATH])
             if code != 0:
                 error_detail = (err or out).strip()
         if code != 0:
@@ -828,8 +829,9 @@ def start_ap(iface: str | None = None, ssid: str = "", password: str = "",
             return False, f"Failed to start hostapd: {error_detail}"
 
     # Start dnsmasq for DHCP
-    if not _start_dnsmasq(ap_iface):
-        return True, "AP started but DHCP server failed to start"
+    dns_ok, dns_msg = _start_dnsmasq(ap_iface)
+    if not dns_ok:
+        return True, f"AP started but DHCP failed: {dns_msg}"
 
     # Enable IP forwarding
     _run(["sysctl", "-w", "net.ipv4.ip_forward=1"])
@@ -838,7 +840,7 @@ def start_ap(iface: str | None = None, ssid: str = "", password: str = "",
     _setup_captive_portal(ap_iface)
 
     # Save AP state for auto-restore on reboot
-    _save_ap_state(_ssid, _password, _channel)
+    _save_ap_state(_ssid, _password, _channel, dual)
 
     tag = " (dual-mode)" if use_virtual else ""
     if use_virtual and _is_dual_channel_mode():
@@ -932,7 +934,7 @@ def set_dhcp_settings(start: str, end: str):
         return False
 
 
-def _save_ap_state(ssid: str, password: str, channel: int):
+def _save_ap_state(ssid: str, password: str, channel: int, dual: bool = True):
     """Save AP state for auto-restore on server restart."""
     try:
         try:
@@ -940,7 +942,7 @@ def _save_ap_state(ssid: str, password: str, channel: int):
                 state = json.loads(f.read())
         except (OSError, json.JSONDecodeError):
             state = {}
-        state.update({"ssid": ssid, "password": password, "channel": channel})
+        state.update({"ssid": ssid, "password": password, "channel": channel, "dual": dual})
         with open(AP_STATE_FILE, "w") as f:
             f.write(json.dumps(state))
     except OSError:
@@ -952,7 +954,7 @@ def _clear_ap_state():
     try:
         with open(AP_STATE_FILE) as f:
             state = json.loads(f.read())
-        for k in ("ssid", "password", "channel"):
+        for k in ("ssid", "password", "channel", "dual"):
             state.pop(k, None)
         if state:
             with open(AP_STATE_FILE, "w") as f:
@@ -973,7 +975,8 @@ def restore_ap_state():
     ssid = state.get("ssid", "")
     password = state.get("password", "")
     channel = state.get("channel", 0)
-    return start_ap(ssid=ssid, password=password, channel=channel, dual=True)
+    dual = state.get("dual", True)
+    return start_ap(ssid=ssid, password=password, channel=channel, dual=dual)
 
 
 def cleanup_wireless() -> tuple[bool, str]:
@@ -1140,18 +1143,19 @@ def _stop_dnsmasq():
             os.remove(DNSMASQ_PID_PATH)
         except OSError:
             pass
-    _run(["pkill", "-f", f"dnsmasq.*{DNSMASQ_CONFIG_PATH}"])
+    _run(["pkill", "-9", "-f", f"dnsmasq.*{DNSMASQ_CONFIG_PATH}"])
+    _run(["pkill", "-9", "dnsmasq"])
 
 
-def _start_dnsmasq(iface: str) -> bool:
-    """Start dnsmasq as DHCP server for AP mode."""
+def _start_dnsmasq(iface: str) -> tuple[bool, str]:
+    """Start dnsmasq as DHCP server for AP mode. Returns (ok, message)."""
     dhcp = _get_dhcp_settings()
     dnsmasq_conf = (
         f"interface={iface}\n"
         f"dhcp-range={dhcp['start']},{dhcp['end']},255.255.255.0,12h\n"
         f"dhcp-option=3,{AP_IP}\n"
         f"dhcp-option=6,{AP_IP}\n"
-        f"dhcp-leasefile=/tmp/smart-wifi-dnsmasq.leases\n"
+        f"dhcp-leasefile={DNSMASQ_LEASE_PATH}\n"
         f"no-resolv\n"
         f"address=/#/{AP_IP}\n"
     )
@@ -1162,14 +1166,21 @@ def _start_dnsmasq(iface: str) -> bool:
     with open(DNSMASQ_CONFIG_PATH, "w") as f:
         f.write(dnsmasq_conf)
 
+    try:
+        os.remove(DNSMASQ_PID_PATH)
+    except OSError:
+        pass
+
     code, _, err = _run([
         "dnsmasq", "-C", DNSMASQ_CONFIG_PATH,
         "-x", DNSMASQ_PID_PATH,
-        "--bind-dynamic"
+        "--bind-interfaces", "--user=root"
     ])
     if code != 0:
-        print(f"dnsmasq failed: {err}", file=sys.stderr)
-    return code == 0
+        msg = f"dnsmasq failed: {err.strip()}" if err.strip() else "dnsmasq returned non-zero exit code"
+        print(msg, file=sys.stderr)
+        return False, msg
+    return True, "dnsmasq started"
 
 
 def _generate_hostapd_config(iface: str, ssid: str, password: str, channel: int) -> str:
@@ -1366,7 +1377,7 @@ def get_ap_clients() -> list[APClient]:
             mac_info[current_mac] = current_info
 
     # Get IP assignments from dnsmasq lease file
-    lease_file = "/tmp/smart-wifi-dnsmasq.leases"
+    lease_file = DNSMASQ_LEASE_PATH
     lease_data: dict[str, dict] = {}
     try:
         with open(lease_file) as f:

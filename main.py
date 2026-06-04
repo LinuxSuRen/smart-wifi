@@ -4,9 +4,10 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from app.web_server import create_app
-from app.config import WEB_HOST, WEB_PORT
+from app.config import WEB_HOST, WEB_PORT, ensure_data_dir
 from app.wifi_manager import cleanup_wireless, restore_ap_state
 
+ensure_data_dir()
 app = create_app()
 
 if __name__ == "__main__":

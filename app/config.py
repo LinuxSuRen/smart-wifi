@@ -10,17 +10,26 @@ AP_NETMASK = os.environ.get("AP_NETMASK", "24")
 AP_DHCP_START = os.environ.get("AP_DHCP_START", "192.168.4.2")
 AP_DHCP_END = os.environ.get("AP_DHCP_END", "192.168.4.100")
 
-HOSTAPD_CONFIG_PATH = "/tmp/smart-wifi-hostapd.conf"
-WPASUPPLICANT_CONFIG_PATH = "/tmp/smart-wifi-wpa.conf"
-DNSMASQ_CONFIG_PATH = "/tmp/smart-wifi-dnsmasq.conf"
-DNSMASQ_PID_PATH = "/tmp/smart-wifi-dnsmasq.pid"
-
 WEB_HOST = os.environ.get("WEB_HOST", "0.0.0.0")
 WEB_PORT = int(os.environ.get("WEB_PORT", "8080"))
 CAPTIVE_PORTAL_URL = os.environ.get("CAPTIVE_PORTAL_URL", "")
-AP_STATE_FILE = "/tmp/smart-wifi-ap-state.json"
-BLACKLIST_FILE = "/tmp/smart-wifi-blacklist.txt"
-RADIO_CONFIG_FILE = "/tmp/smart-wifi-radio-config.json"
+
+DATA_DIR = os.environ.get("DATA_DIR", "/var/lib/smart-wifi")
+HOSTAPD_CONFIG_PATH = os.path.join(DATA_DIR, "smart-wifi-hostapd.conf")
+HOSTAPD_PID_PATH = os.path.join(DATA_DIR, "smart-wifi-hostapd.pid")
+WPASUPPLICANT_CONFIG_PATH = os.path.join(DATA_DIR, "smart-wifi-wpa.conf")
+DNSMASQ_CONFIG_PATH = os.path.join(DATA_DIR, "smart-wifi-dnsmasq.conf")
+DNSMASQ_PID_PATH = os.path.join(DATA_DIR, "smart-wifi-dnsmasq.pid")
+DNSMASQ_LEASE_PATH = os.path.join(DATA_DIR, "smart-wifi-dnsmasq.leases")
+AP_STATE_FILE = os.path.join(DATA_DIR, "smart-wifi-ap-state.json")
+BLACKLIST_FILE = os.path.join(DATA_DIR, "smart-wifi-blacklist.txt")
+RADIO_CONFIG_FILE = os.path.join(DATA_DIR, "smart-wifi-radio-config.json")
+LOG_FILE = os.path.join(DATA_DIR, "smart-wifi-server.log")
+SERVICE_FILE = "/etc/systemd/system/smart-wifi.service"
+
+
+def ensure_data_dir():
+    os.makedirs(DATA_DIR, mode=0o755, exist_ok=True)
 
 
 # ---- radio config persistence ----

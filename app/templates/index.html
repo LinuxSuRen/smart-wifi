@@ -239,6 +239,22 @@ input:focus,select:focus{outline:none;border-color:#3b82f6}
       <h2>Configuration</h2>
       <div id="configContent">Loading...</div>
     </div>
+    <div class="card">
+      <h2 style="display:flex;justify-content:space-between;align-items:center">
+        Auto Start
+        <span id="autoStartStatus"></span>
+      </h2>
+      <p style="color:#94a3b8;font-size:.85rem;margin-bottom:12px">
+        Automatically start Smart WiFi Manager and restore AP mode on system boot.
+      </p>
+      <button class="btn btn-success" id="btnEnableAutoStart" onclick="toggleAutoStart(true)" style="display:none">
+        Enable Auto Start
+      </button>
+      <button class="btn btn-danger" id="btnDisableAutoStart" onclick="toggleAutoStart(false)" style="display:none">
+        Disable Auto Start
+      </button>
+      <div id="autoStartMsg" style="margin-top:8px;font-size:.85rem"></div>
+    </div>
   </div>
 </div>
 
@@ -429,7 +445,7 @@ async function connectToWifi(e) {
 async function loadApState() {
   try {
     var data = await fetchJSON(API + '/ap/saved');
-    document.getElementById('apMode').value = 'dual';
+    document.getElementById('apMode').value = data.dual ? 'dual' : 'ap';
     document.getElementById('apSsid').value = data.ssid || '';
     document.getElementById('apPassword').value = data.password || '';
     document.getElementById('apChannel').value = String(data.channel || '6');
@@ -573,6 +589,48 @@ async function loadConfig() {
      stat('AP Netmask', data.ap_netmask) +
      stat('WiFi Interface', data.wifi_interface) +
      stat('Captive Portal URL', data.captive_portal_url || '-');
+  loadAutoStartStatus();
+}
+
+async function loadAutoStartStatus() {
+  try {
+    var data = await fetchJSON(API + '/autostart/status');
+    var statusEl = document.getElementById('autoStartStatus');
+    var enableBtn = document.getElementById('btnEnableAutoStart');
+    var disableBtn = document.getElementById('btnDisableAutoStart');
+    if (data.enabled) {
+      statusEl.innerHTML = badgeHtml(data.active ? 'Active' : 'Inactive', data.active ? 'green' : 'yellow');
+      enableBtn.style.display = 'none';
+      disableBtn.style.display = 'inline-block';
+    } else {
+      statusEl.innerHTML = badgeHtml('Disabled', 'red');
+      enableBtn.style.display = 'inline-block';
+      disableBtn.style.display = 'none';
+    }
+  } catch(e) {
+    document.getElementById('autoStartStatus').innerHTML = badgeHtml('Error', 'red');
+  }
+}
+
+async function toggleAutoStart(enable) {
+  var btn = enable ? document.getElementById('btnEnableAutoStart') : document.getElementById('btnDisableAutoStart');
+  var msg = document.getElementById('autoStartMsg');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> ' + (enable ? 'Enabling...' : 'Disabling...');
+  msg.innerHTML = '';
+  try {
+    var data = await fetchJSON(API + '/autostart/toggle', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({enable: enable})
+    });
+    msg.innerHTML = '<span style="color:' + (data.ok ? '#6ee7b7' : '#fca5a5') + '">' + data.message + '</span>';
+    if (data.ok) setTimeout(loadAutoStartStatus, 1500);
+  } catch(e) {
+    msg.innerHTML = '<span style="color:#fca5a5">Failed: ' + e.message + '</span>';
+  }
+  btn.disabled = false;
+  btn.innerHTML = enable ? 'Enable Auto Start' : 'Disable Auto Start';
 }
 
 // --- Tabs ---

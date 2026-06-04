@@ -61,7 +61,8 @@ case "$MODE" in
         export WIFI_INTERFACE="${WIFI_INTERFACE:-wlp2s0}"
         export WEB_HOST="0.0.0.0"
         export WEB_PORT="${WEB_PORT:-8080}"
-        exec python3 main.py 2>>/tmp/smart-wifi-server.log
+        mkdir -p /var/lib/smart-wifi
+        exec python3 main.py 2>>/var/lib/smart-wifi/smart-wifi-server.log
         ;;
     docker)
         echo "=== Starting Smart WiFi Manager (docker, privileged) ==="

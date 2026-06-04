@@ -1,10 +1,14 @@
 import json as _json
+import os
+import subprocess
+import sys
 
 from flask import Flask, jsonify, render_template, request
 
 from app.config import (AP_CHANNEL, AP_IP, AP_NETMASK, AP_PASSWORD, AP_SSID,
                         CAPTIVE_PORTAL_URL, WIFI_INTERFACE, WEB_HOST, WEB_PORT,
-                        AP_STATE_FILE, AP_DHCP_START, AP_DHCP_END)
+                        AP_STATE_FILE, AP_DHCP_START, AP_DHCP_END,
+                        DATA_DIR, SERVICE_FILE)
 from app.wifi_manager import (WiFiNetwork, WiFiStatus, RadioInfo,
                                connect_to_wifi, disconnect_wifi,
                                get_ap_clients, get_blacklist,
@@ -143,6 +147,7 @@ def create_app() -> Flask:
                 "ssid": st.get("ssid", AP_SSID),
                 "password": st.get("password", AP_PASSWORD),
                 "channel": st.get("channel", AP_CHANNEL),
+                "dual": st.get("dual", True),
                 "captive_portal_url": st.get("captive_portal_url", CAPTIVE_PORTAL_URL),
                 "dhcp_start": st.get("dhcp_start", AP_DHCP_START),
                 "dhcp_end": st.get("dhcp_end", AP_DHCP_END),
@@ -152,6 +157,7 @@ def create_app() -> Flask:
                 "ssid": AP_SSID,
                 "password": AP_PASSWORD,
                 "channel": AP_CHANNEL,
+                "dual": True,
                 "captive_portal_url": CAPTIVE_PORTAL_URL,
                 "dhcp_start": AP_DHCP_START,
                 "dhcp_end": AP_DHCP_END,
@@ -225,6 +231,65 @@ def create_app() -> Flask:
     def api_deps_install():
         ok, msg, manual_cmd = install_dependencies()
         return jsonify({"ok": ok, "message": msg, "manual_cmd": manual_cmd, "deps": check_dependencies()})
+
+    @app.route("/api/autostart/status")
+    def api_autostart_status():
+        enabled = os.path.exists(SERVICE_FILE)
+        active = False
+        if enabled:
+            r = subprocess.run(["systemctl", "is-active", "smart-wifi.service"],
+                               capture_output=True, text=True, timeout=10)
+            active = r.stdout.strip() == "active"
+        return jsonify({
+            "enabled": enabled,
+            "active": active,
+            "service_path": SERVICE_FILE,
+        })
+
+    @app.route("/api/autostart/toggle", methods=["POST"])
+    def api_autostart_toggle():
+        data = request.get_json(silent=True) or {}
+        enable = data.get("enable", True)
+        script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        python = sys.executable or "/usr/bin/python3"
+        main_py = os.path.join(script_dir, "main.py")
+
+        if enable:
+            unit = (
+                "[Unit]\n"
+                "Description=Smart WiFi Manager\n"
+                "After=network.target\n"
+                "\n"
+                "[Service]\n"
+                f"Type=simple\n"
+                f"ExecStart={python} {main_py}\n"
+                f"WorkingDirectory={script_dir}\n"
+                "Restart=on-failure\n"
+                "RestartSec=5\n"
+                f"Environment=DATA_DIR={DATA_DIR}\n"
+                "\n"
+                "[Install]\n"
+                "WantedBy=multi-user.target\n"
+            )
+            try:
+                with open(SERVICE_FILE, "w") as f:
+                    f.write(unit)
+                subprocess.run(["systemctl", "daemon-reload"], capture_output=True, timeout=30)
+                subprocess.run(["systemctl", "enable", "smart-wifi.service"], capture_output=True, timeout=30)
+                subprocess.run(["systemctl", "start", "smart-wifi.service"], capture_output=True, timeout=30)
+                return jsonify({"ok": True, "message": "Auto-start enabled"})
+            except OSError as e:
+                return jsonify({"ok": False, "message": f"Failed to write service file: {e}"}), 500
+        else:
+            try:
+                subprocess.run(["systemctl", "stop", "smart-wifi.service"], capture_output=True, timeout=30)
+                subprocess.run(["systemctl", "disable", "smart-wifi.service"], capture_output=True, timeout=30)
+                if os.path.exists(SERVICE_FILE):
+                    os.remove(SERVICE_FILE)
+                subprocess.run(["systemctl", "daemon-reload"], capture_output=True, timeout=30)
+                return jsonify({"ok": True, "message": "Auto-start disabled"})
+            except OSError as e:
+                return jsonify({"ok": False, "message": f"Failed to remove service file: {e}"}), 500
 
     @app.before_request
     def _captive_portal_intercept():
