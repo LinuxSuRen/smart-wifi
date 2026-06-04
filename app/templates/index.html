@@ -230,6 +230,22 @@ input:focus,select:focus{outline:none;border-color:#3b82f6}
         Network Interfaces
         <button class="btn btn-primary btn-sm" onclick="loadInterfaces()" id="btnRefreshIfaces">🔄 Refresh</button>
       </h2>
+      <div style="display:flex;gap:8px;margin-bottom:12px">
+        <input type="text" id="filterIfaceName" placeholder="Filter by name..." style="flex:1" oninput="filterInterfaces()">
+        <select id="filterIfaceType" onchange="filterInterfaces()" style="width:auto">
+          <option value="">All types</option>
+          <option value="wireless">Wireless</option>
+          <option value="ethernet">Ethernet</option>
+          <option value="loopback">Loopback</option>
+          <option value="bridge">Bridge</option>
+          <option value="other">Other</option>
+        </select>
+        <select id="filterIfaceState" onchange="filterInterfaces()" style="width:auto">
+          <option value="">All states</option>
+          <option value="up">UP</option>
+          <option value="down">DOWN</option>
+        </select>
+      </div>
       <div id="interfacesContent">Loading...</div>
     </div>
   </div>
@@ -297,10 +313,13 @@ async function fetchJSON(url, opts) {
 }
 
 // --- Status ---
+var _connectedSsid = '';
+
 async function loadStatus() {
   try {
     const data = await fetchJSON(API + '/status');
     const s = data.status;
+    _connectedSsid = s.connected_ssid || '';
     var sub = 'Interface: ' + (s.interface || 'N/A') + ' | Mode: ' + s.mode;
     document.getElementById('sysSubtitle').innerHTML = sub;
     document.getElementById('statusContent').innerHTML =
@@ -374,9 +393,10 @@ async function scanNetworks() {
     list.innerHTML = data.networks.map(n => {
       const sig = n.signal > -50 ? 4 : n.signal > -65 ? 3 : n.signal > -75 ? 2 : 1;
       const lock = n.security !== 'Open' ? ' 🔒' : '';
+      const connected = n.ssid === _connectedSsid ? ' ' + badgeHtml('Connected', 'green') : '';
       return '<div class="network-item" onclick="openConnectModal(\'' +
         escapeHtml(n.ssid) + '\', \'' + n.security + '\', \'' + (n.frequency || '') + '\')">' +
-        '<div class="info"><div class="ssid">' + escapeHtml(n.ssid) + lock + '</div>' +
+        '<div class="info"><div class="ssid">' + escapeHtml(n.ssid) + lock + connected + '</div>' +
         '<div class="meta">' + n.security + ' | Ch ' + n.channel + ' | ' + n.bssid + '</div></div>' +
         '<div class="signal">' + n.signal + ' dBm' +
         '<span class="signal-dot signal-' + sig + '"></span></div>' +
@@ -755,36 +775,64 @@ async function blacklistMac(mac) {
 }
 
 // --- Interfaces ---
+var _allInterfaces = [];
+
+function guessIfaceType(name) {
+  if (/^wl/.test(name)) return 'wireless';
+  if (/^lo$/.test(name)) return 'loopback';
+  if (/^br/.test(name) || /^docker/.test(name)) return 'bridge';
+  if (/^eth/.test(name) || /^en/.test(name)) return 'ethernet';
+  return 'other';
+}
+
+function filterInterfaces() {
+  var nameFilter = document.getElementById('filterIfaceName').value.toLowerCase().trim();
+  var typeFilter = document.getElementById('filterIfaceType').value;
+  var stateFilter = document.getElementById('filterIfaceState').value;
+  var list = document.getElementById('interfacesContent');
+  var filtered = _allInterfaces.filter(function(i) {
+    if (nameFilter && i.name.toLowerCase().indexOf(nameFilter) === -1) return false;
+    if (typeFilter && guessIfaceType(i.name) !== typeFilter) return false;
+    if (stateFilter && i.state !== stateFilter) return false;
+    return true;
+  });
+  if (filtered.length === 0) {
+    list.innerHTML = '<p style="color:#94a3b8;padding:12px">No matching interfaces</p>';
+    return;
+  }
+  list.innerHTML = filtered.map(function(i) {
+    var ips = i.ipv4.concat(i.ipv6).join(', ') || '-';
+    var st = i.state === 'up' ? badgeHtml('UP', 'green') : badgeHtml('DOWN', 'red');
+    var spd = i.speed || '-';
+    var typeLabel = guessIfaceType(i.name);
+    return '<div style="background:#0f172a;border-radius:8px;padding:12px;margin-bottom:8px;border:1px solid #334155">' +
+      '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">' +
+      '<strong style="font-size:1rem">' + escapeHtml(i.name) + '</strong>' +
+      '<span>' + typeLabel + ' ' + st + '</span>' +
+      '</div>' +
+      '<div class="grid3">' +
+      stat('MAC', i.mac || '-') +
+      stat('MTU', i.mtu) +
+      stat('Speed', spd) +
+      stat('IPv4', ips) +
+      stat('RX', fmtBytes(i.rx_bytes)) +
+      stat('TX', fmtBytes(i.tx_bytes)) +
+      '</div>' +
+      '</div>';
+  }).join('');
+}
+
 async function loadInterfaces() {
   var btn = document.getElementById('btnRefreshIfaces');
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner"></span>';
   try {
     var data = await fetchJSON(API + '/interfaces');
-    var list = document.getElementById('interfacesContent');
-    if (!data.interfaces || data.interfaces.length === 0) {
-      list.innerHTML = '<p style="color:#94a3b8;padding:12px">No interfaces found</p>';
-      return;
-    }
-    list.innerHTML = data.interfaces.map(function(i) {
-      var ips = i.ipv4.concat(i.ipv6).join(', ') || '-';
-      var st = i.state === 'up' ? badgeHtml('UP', 'green') : badgeHtml('DOWN', 'red');
-      var spd = i.speed || '-';
-      return '<div style="background:#0f172a;border-radius:8px;padding:12px;margin-bottom:8px;border:1px solid #334155">' +
-        '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">' +
-        '<strong style="font-size:1rem">' + escapeHtml(i.name) + '</strong>' +
-        '<span>' + st + '</span>' +
-        '</div>' +
-        '<div class="grid3">' +
-        stat('MAC', i.mac || '-') +
-        stat('MTU', i.mtu) +
-        stat('Speed', spd) +
-        stat('IPv4', ips) +
-        stat('RX', fmtBytes(i.rx_bytes)) +
-        stat('TX', fmtBytes(i.tx_bytes)) +
-        '</div>' +
-        '</div>';
-    }).join('');
+    _allInterfaces = data.interfaces || [];
+    document.getElementById('filterIfaceName').value = '';
+    document.getElementById('filterIfaceType').value = '';
+    document.getElementById('filterIfaceState').value = '';
+    filterInterfaces();
   } catch(e) {
     document.getElementById('interfacesContent').innerHTML = '<p style="color:#fca5a5">Error loading interfaces</p>';
   } finally {
