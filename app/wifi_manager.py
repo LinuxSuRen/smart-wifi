@@ -1120,6 +1120,56 @@ def disconnect_wifi(iface: str | None = None) -> tuple[bool, str]:
     return True, "Disconnected"
 
 
+def forget_wifi_network(iface: str | None = None) -> tuple[bool, str]:
+    """Forget the currently connected/saved WiFi network.
+
+    Disconnects and clears the wpa_supplicant config so the
+    network won't reconnect automatically.
+    """
+    if iface is None:
+        iface = _find_wireless_iface()
+    if iface is None:
+        return False, "No wireless interface found"
+
+    _run(["pkill", "-f", f"wpa_supplicant.*{iface}"])
+    _run(["dhclient", "-r", iface])
+    _run(["ip", "addr", "flush", "dev", iface])
+
+    try:
+        os.remove(WPASUPPLICANT_CONFIG_PATH)
+    except FileNotFoundError:
+        pass
+
+    _systemctl("start", "wpa_supplicant")
+    _systemctl("start", "wpa_supplicant.socket")
+    return True, "Network forgotten"
+
+
+def get_saved_wifi_password() -> tuple[str, str]:
+    """Read saved SSID and password from wpa_supplicant config.
+
+    Returns (ssid, password) tuple. Both will be empty strings
+    if no network is configured.
+    """
+    try:
+        with open(WPASUPPLICANT_CONFIG_PATH) as f:
+            content = f.read()
+    except (OSError, FileNotFoundError):
+        return "", ""
+
+    ssid = ""
+    password = ""
+    for line in content.split("\n"):
+        line = line.strip()
+        if line.startswith("ssid="):
+            val = line.split("=", 1)[1].strip().strip('"')
+            ssid = val
+        elif line.startswith("psk="):
+            val = line.split("=", 1)[1].strip().strip('"')
+            password = val
+    return ssid, password
+
+
 def _stop_hostapd():
     """Kill the hostapd process managing our config."""
     _run(["pkill", "-9", "-f", f"hostapd.*{HOSTAPD_CONFIG_PATH}"])

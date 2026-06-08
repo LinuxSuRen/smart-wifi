@@ -20,7 +20,8 @@ from app.config import (AP_CHANNEL, AP_IP, AP_NETMASK, AP_PASSWORD, AP_SSID,
                         DATA_DIR, SERVICE_FILE, SECRET_KEY)
 from app.wifi_manager import (WiFiNetwork, WiFiStatus, RadioInfo, USBWiFiDevice,
                                KernelWifiModule,
-                               connect_to_wifi, disconnect_wifi,
+                                connect_to_wifi, disconnect_wifi, forget_wifi_network,
+                                get_saved_wifi_password,
                                get_ap_clients, get_blacklist,
                                get_hostapd_status,
                                kick_client, blacklist_client, unblacklist_client,
@@ -142,6 +143,16 @@ def create_app() -> Flask:
     def api_disconnect():
         ok, msg = disconnect_wifi()
         return jsonify({"ok": ok, "message": msg})
+
+    @app.route("/api/forget", methods=["POST"])
+    def api_forget():
+        ok, msg = forget_wifi_network()
+        return jsonify({"ok": ok, "message": msg})
+
+    @app.route("/api/saved-password")
+    def api_saved_password():
+        ssid, password = get_saved_wifi_password()
+        return jsonify({"ok": True, "ssid": ssid, "password": password})
 
     @app.route("/api/ap/start", methods=["POST"])
     def api_start_ap():
