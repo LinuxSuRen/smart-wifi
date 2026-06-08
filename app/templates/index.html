@@ -198,6 +198,15 @@ input:focus,select:focus{outline:none;border-color:#3b82f6}
   </div>
 </div>
         </div>
+        <div style="margin-top:12px">
+          <label style="font-weight:600;margin-bottom:4px;display:block">DNS Records (for connected clients)</label>
+          <div style="display:flex;gap:8px;margin-bottom:4px">
+            <input type="text" id="dnsDomain" placeholder="domain (e.g. myapp.local)" style="flex:1">
+            <input type="text" id="dnsIp" placeholder="IP" style="width:140px">
+            <button type="button" class="btn btn-sm" onclick="addDnsRecord()" style="background:#1e3a5f;color:#93c5fd;border:1px solid #1e40af;padding:2px 12px;font-size:.75rem;white-space:nowrap">Add</button>
+          </div>
+          <div id="dnsRecordsList" style="font-size:.75rem;color:#94a3b8">Loading...</div>
+        </div>
         <div style="display:flex;gap:8px;margin-top:8px">
           <button type="submit" class="btn btn-success" id="btnStartAp">Start AP</button>
           <button type="button" class="btn btn-danger" onclick="stopAp()" id="btnStopAp">Stop AP</button>
@@ -547,6 +556,51 @@ async function showSavedPassword() {
   }
 }
 
+// --- DNS Records ---
+async function loadDnsRecords() {
+  try {
+    var data = await fetchJSON(API + '/dns/records');
+    var list = document.getElementById('dnsRecordsList');
+    var records = data.records || {};
+    var entries = Object.entries(records);
+    if (entries.length === 0) {
+      list.innerHTML = '<span style="color:#94a3b8">No DNS records</span>';
+      return;
+    }
+    list.innerHTML = entries.map(function(e) {
+      return '<div style="display:flex;justify-content:space-between;align-items:center;background:#0f172a;border-radius:6px;padding:4px 8px;margin-bottom:2px;border:1px solid #334155">' +
+        '<span>' + escapeHtml(e[0]) + ' → ' + escapeHtml(e[1]) + '</span>' +
+        '<button class="btn btn-sm" onclick="deleteDnsRecord(\'' + escapeHtml(e[0]) + '\')" style="background:#7f1d1d;color:#fca5a5;border:1px solid #991b1b;padding:1px 6px;font-size:.65rem">✕</button>' +
+        '</div>';
+    }).join('');
+  } catch(e) {
+    document.getElementById('dnsRecordsList').innerHTML = '<span style="color:#fca5a5">Error</span>';
+  }
+}
+
+async function addDnsRecord() {
+  var domain = document.getElementById('dnsDomain').value.trim();
+  var ip = document.getElementById('dnsIp').value.trim();
+  if (!domain || !ip) { showToast('Domain and IP are required', false); return; }
+  try {
+    var data = await fetchJSON(API + '/dns/records', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({domain: domain, ip: ip})
+    });
+    showToast(data.message, data.ok);
+    if (data.ok) { document.getElementById('dnsDomain').value = ''; document.getElementById('dnsIp').value = ''; loadDnsRecords(); showToast('Restart AP for changes to take effect', true); }
+  } catch(e) { showToast('Failed to add DNS record', false); }
+}
+
+async function deleteDnsRecord(domain) {
+  try {
+    var data = await fetchJSON(API + '/dns/records/' + encodeURIComponent(domain), {method: 'DELETE'});
+    showToast(data.message, data.ok);
+    if (data.ok) loadDnsRecords();
+  } catch(e) { showToast('Failed to delete DNS record', false); }
+}
+
 // --- AP ---
 async function loadApState() {
   try {
@@ -630,6 +684,7 @@ async function startAp(e) {
   if (data.ok) {
     setTimeout(loadStatus, 1500);
     setTimeout(loadHostapdStatus, 1500);
+    loadDnsRecords();
   }
 }
 async function loadHostapdStatus() {
@@ -745,6 +800,7 @@ document.getElementById('tabAp').onclick = function() {
   switchTab('ap');
   loadApState();
   loadApInterfaces();
+  loadDnsRecords();
   loadStatus();
   loadHostapdStatus();
 };

@@ -1207,6 +1207,9 @@ def _start_dnsmasq(iface: str) -> tuple[bool, str]:
     )
     if captive_url:
         dnsmasq_conf += f"no-resolv\naddress=/#/{AP_IP}\n"
+    else:
+        for domain, ip in _load_dns_records().items():
+            dnsmasq_conf += f"address=/{domain}/{ip}\n"
     try:
         os.remove(DNSMASQ_CONFIG_PATH)
     except OSError:
@@ -1229,6 +1232,61 @@ def _start_dnsmasq(iface: str) -> tuple[bool, str]:
         print(msg, file=sys.stderr)
         return False, msg
     return True, "dnsmasq started"
+
+
+def _load_dns_records() -> dict[str, str]:
+    """Load DNS records from AP state file. Returns {domain: ip} dict."""
+    try:
+        with open(AP_STATE_FILE) as f:
+            state = json.loads(f.read())
+        return state.get("dns_records", {})
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _save_dns_records(records: dict[str, str]):
+    """Save DNS records to AP state file."""
+    try:
+        try:
+            with open(AP_STATE_FILE) as f:
+                state = json.loads(f.read())
+        except (OSError, json.JSONDecodeError):
+            state = {}
+        state["dns_records"] = records
+        with open(AP_STATE_FILE, "w") as f:
+            f.write(json.dumps(state))
+    except OSError:
+        pass
+
+
+def get_dns_records() -> dict[str, str]:
+    """Return all configured DNS records."""
+    return _load_dns_records()
+
+
+def add_dns_record(domain: str, ip: str) -> tuple[bool, str]:
+    """Add or update a DNS record. Required dnsmasq restart to take effect."""
+    domain = domain.strip()
+    ip = ip.strip()
+    if not domain:
+        return False, "Domain name is required"
+    if not ip:
+        return False, "IP address is required"
+    records = _load_dns_records()
+    records[domain] = ip
+    _save_dns_records(records)
+    return True, f"DNS record '{domain}' -> '{ip}' saved"
+
+
+def delete_dns_record(domain: str) -> tuple[bool, str]:
+    """Delete a DNS record. Required dnsmasq restart to take effect."""
+    domain = domain.strip()
+    records = _load_dns_records()
+    if domain not in records:
+        return False, f"DNS record '{domain}' not found"
+    del records[domain]
+    _save_dns_records(records)
+    return True, f"DNS record '{domain}' removed"
 
 
 def _generate_hostapd_config(iface: str, ssid: str, password: str, channel: int) -> str:

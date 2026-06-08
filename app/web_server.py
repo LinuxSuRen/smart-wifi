@@ -22,6 +22,7 @@ from app.wifi_manager import (WiFiNetwork, WiFiStatus, RadioInfo, USBWiFiDevice,
                                KernelWifiModule,
                                 connect_to_wifi, disconnect_wifi, forget_wifi_network,
                                 get_saved_wifi_password,
+                                get_dns_records, add_dns_record, delete_dns_record,
                                get_ap_clients, get_blacklist,
                                get_hostapd_status,
                                kick_client, blacklist_client, unblacklist_client,
@@ -153,6 +154,23 @@ def create_app() -> Flask:
     def api_saved_password():
         ssid, password = get_saved_wifi_password()
         return jsonify({"ok": True, "ssid": ssid, "password": password})
+
+    @app.route("/api/dns/records")
+    def api_get_dns_records():
+        return jsonify({"ok": True, "records": get_dns_records()})
+
+    @app.route("/api/dns/records", methods=["POST"])
+    def api_add_dns_record():
+        data = request.get_json(silent=True) or {}
+        domain = data.get("domain", "")
+        ip = data.get("ip", "")
+        ok, msg = add_dns_record(domain, ip)
+        return jsonify({"ok": ok, "message": msg})
+
+    @app.route("/api/dns/records/<domain>", methods=["DELETE"])
+    def api_delete_dns_record(domain: str):
+        ok, msg = delete_dns_record(domain)
+        return jsonify({"ok": ok, "message": msg})
 
     @app.route("/api/ap/start", methods=["POST"])
     def api_start_ap():
