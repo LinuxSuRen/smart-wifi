@@ -18,7 +18,8 @@ from app.config import (AP_CHANNEL, AP_IP, AP_NETMASK, AP_PASSWORD, AP_SSID,
                         CAPTIVE_PORTAL_URL, WIFI_INTERFACE, WEB_HOST, WEB_PORT,
                         AP_STATE_FILE, AP_DHCP_START, AP_DHCP_END,
                         DATA_DIR, SERVICE_FILE, SECRET_KEY)
-from app.wifi_manager import (WiFiNetwork, WiFiStatus, RadioInfo,
+from app.wifi_manager import (WiFiNetwork, WiFiStatus, RadioInfo, USBWiFiDevice,
+                               KernelWifiModule,
                                connect_to_wifi, disconnect_wifi,
                                get_ap_clients, get_blacklist,
                                get_hostapd_status,
@@ -29,6 +30,9 @@ from app.wifi_manager import (WiFiNetwork, WiFiStatus, RadioInfo,
                                scan_networks, set_captive_portal_url, set_dhcp_settings,
                                start_ap, stop_ap,
                                cleanup_wireless, detect_wireless_radios,
+                               detect_usb_wifi_devices, detect_wifi_kernel_modules,
+                               get_full_wifi_diagnostics,
+                               load_kernel_module, unload_kernel_module,
                                check_dependencies, install_dependencies)
 from app.config import save_radio_config
 
@@ -309,6 +313,38 @@ def create_app() -> Flask:
         ok, msg, manual_cmd = install_dependencies()
         return jsonify({"ok": ok, "message": msg, "manual_cmd": manual_cmd, "deps": check_dependencies()})
 
+    @app.route("/api/diagnostics")
+    def api_diagnostics():
+        return jsonify({"ok": True, **get_full_wifi_diagnostics()})
+
+    @app.route("/api/diagnostics/usb")
+    def api_diagnostics_usb():
+        devices = detect_usb_wifi_devices()
+        return jsonify({"ok": True, "devices": [_usb_to_dict(d) for d in devices]})
+
+    @app.route("/api/diagnostics/modules")
+    def api_diagnostics_modules():
+        modules = detect_wifi_kernel_modules()
+        return jsonify({"ok": True, "modules": [_mod_to_dict(m) for m in modules]})
+
+    @app.route("/api/diagnostics/modules/load", methods=["POST"])
+    def api_diagnostics_load_module():
+        data = request.get_json(silent=True) or {}
+        module_name = data.get("module", "")
+        if not module_name:
+            return jsonify({"ok": False, "message": "Module name required"}), 400
+        ok, msg = load_kernel_module(module_name)
+        return jsonify({"ok": ok, "message": msg})
+
+    @app.route("/api/diagnostics/modules/unload", methods=["POST"])
+    def api_diagnostics_unload_module():
+        data = request.get_json(silent=True) or {}
+        module_name = data.get("module", "")
+        if not module_name:
+            return jsonify({"ok": False, "message": "Module name required"}), 400
+        ok, msg = unload_kernel_module(module_name)
+        return jsonify({"ok": ok, "message": msg})
+
     @app.route("/api/autostart/status")
     def api_autostart_status():
         enabled = os.path.exists(SERVICE_FILE)
@@ -469,4 +505,32 @@ def _radio_to_dict(r: RadioInfo) -> dict:
         "supports_station": r.supports_station,
         "supports_dual": r.supports_dual,
         "supports_dual_channel": r.supports_dual_channel,
+    }
+
+
+def _usb_to_dict(d: USBWiFiDevice) -> dict:
+    return {
+        "bus": d.bus,
+        "device": d.device,
+        "vendor_id": d.vendor_id,
+        "product_id": d.product_id,
+        "vendor_name": d.vendor_name,
+        "product_name": d.product_name,
+        "driver": d.driver,
+        "module": d.module,
+        "interface": d.interface,
+        "driver_state": d.driver_state,
+        "speed": d.speed,
+    }
+
+
+def _mod_to_dict(m: KernelWifiModule) -> dict:
+    return {
+        "name": m.name,
+        "loaded": m.loaded,
+        "size": m.size,
+        "used_by": m.used_by,
+        "description": m.description,
+        "license": m.license,
+        "version": m.version,
     }

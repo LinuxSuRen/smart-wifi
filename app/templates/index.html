@@ -118,6 +118,7 @@ input:focus,select:focus{outline:none;border-color:#3b82f6}
     <button class="tab" id="tabAp">Hotspot / AP</button>
     <button class="tab" id="tabClients">Clients</button>
     <button class="tab" id="tabInterfaces">Interfaces</button>
+    <button class="tab" id="tabDiagnostics">Diagnostics</button>
     <button class="tab" id="tabConfig">Settings</button>
   </div>
 
@@ -250,6 +251,41 @@ input:focus,select:focus{outline:none;border-color:#3b82f6}
         </select>
       </div>
       <div id="interfacesContent">Loading...</div>
+      <button id="btnShowAllInterfaces" class="btn btn-sm" onclick="showAllInterfaces()" style="display:none;margin-top:8px;width:100%;background:#1e293b;color:#e2e8f0;border:1px solid #334155">Show all <span id="ifacesTotalCount"></span> interfaces</button>
+    </div>
+  </div>
+
+  <div id="panelDiagnostics" style="display:none">
+    <div class="card">
+      <h2 style="display:flex;justify-content:space-between;align-items:center">
+        USB WiFi Adapters
+        <button class="btn btn-primary btn-sm" onclick="loadDiagnostics()" id="btnRefreshDiag">🔄 Refresh</button>
+      </h2>
+      <div id="diagUsbContent" style="font-size:.85rem;color:#94a3b8">Loading...</div>
+    </div>
+    <div class="card">
+      <h2>Kernel WiFi Modules</h2>
+      <div style="display:flex;gap:8px;margin-bottom:12px">
+        <input type="text" id="filterModuleName" placeholder="Filter by name..." style="flex:1" oninput="filterKernelModules()">
+        <select id="filterModuleStatus" onchange="filterKernelModules()" style="width:auto">
+          <option value="">All</option>
+          <option value="loaded" selected>Loaded</option>
+          <option value="not_loaded">Not loaded</option>
+        </select>
+      </div>
+      <div id="diagModulesContent" style="font-size:.85rem;color:#94a3b8">Loading...</div>
+    </div>
+    <div class="card" id="diagWarningsCard" style="display:none">
+      <h2>⚠ Warnings</h2>
+      <div id="diagWarningsContent"></div>
+    </div>
+    <div class="card" id="diagRfkillCard" style="display:none">
+      <h2>RF Kill Switch Status</h2>
+      <pre id="rfkillOutput" style="background:#0f172a;padding:12px;border-radius:8px;font-size:.8rem;font-family:monospace;overflow-x:auto;white-space:pre-wrap;margin:0"></pre>
+    </div>
+    <div class="card" id="diagLsusbCard" style="display:none">
+      <h2>lsusb Output</h2>
+      <pre id="lsusbOutput" style="background:#0f172a;padding:12px;border-radius:8px;font-size:.8rem;font-family:monospace;overflow-x:auto;white-space:pre-wrap;margin:0"></pre>
     </div>
   </div>
 
@@ -693,9 +729,13 @@ document.getElementById('tabConfig').onclick = function() {
   switchTab('config');
   loadConfig();
 };
+document.getElementById('tabDiagnostics').onclick = function() {
+  switchTab('diagnostics');
+  loadDiagnostics();
+};
 function switchTab(t) {
   localStorage.setItem('activeTab', t);
-  ['Station','Ap','Clients','Interfaces','Config'].forEach(function(name) {
+  ['Station','Ap','Clients','Interfaces','Diagnostics','Config'].forEach(function(name) {
     var panel = document.getElementById('panel' + name);
     var tab = document.getElementById('tab' + name);
     if (name.toLowerCase() === t) {
@@ -795,6 +835,9 @@ async function blacklistMac(mac) {
 
 // --- Interfaces ---
 var _allInterfaces = [];
+var _ifacesShowAll = false;
+var _ifacesFiltered = [];
+var _allKernelModules = [];
 
 function guessIfaceType(name) {
   if (/^wl/.test(name)) return 'wireless';
@@ -805,21 +848,31 @@ function guessIfaceType(name) {
 }
 
 function filterInterfaces() {
+  _ifacesShowAll = false;
   var nameFilter = document.getElementById('filterIfaceName').value.toLowerCase().trim();
   var typeFilter = document.getElementById('filterIfaceType').value;
   var stateFilter = document.getElementById('filterIfaceState').value;
   var list = document.getElementById('interfacesContent');
-  var filtered = _allInterfaces.filter(function(i) {
+  _ifacesFiltered = _allInterfaces.filter(function(i) {
     if (nameFilter && i.name.toLowerCase().indexOf(nameFilter) === -1) return false;
     if (typeFilter && guessIfaceType(i.name) !== typeFilter) return false;
     if (stateFilter && i.state !== stateFilter) return false;
     return true;
   });
-  if (filtered.length === 0) {
+  if (_ifacesFiltered.length === 0) {
     list.innerHTML = '<p style="color:#94a3b8;padding:12px">No matching interfaces</p>';
+    document.getElementById('btnShowAllInterfaces').style.display = 'none';
     return;
   }
-  list.innerHTML = filtered.map(function(i) {
+  renderInterfaceList();
+}
+
+function renderInterfaceList() {
+  var list = document.getElementById('interfacesContent');
+  var pageSize = 10;
+  var showAll = _ifacesShowAll;
+  var toShow = showAll ? _ifacesFiltered : _ifacesFiltered.slice(0, pageSize);
+  list.innerHTML = toShow.map(function(i) {
     var ips = i.ipv4.concat(i.ipv6).join(', ') || '-';
     var st = i.state === 'up' ? badgeHtml('UP', 'green') : badgeHtml('DOWN', 'red');
     var spd = i.speed || '-';
@@ -839,6 +892,18 @@ function filterInterfaces() {
       '</div>' +
       '</div>';
   }).join('');
+  var btn = document.getElementById('btnShowAllInterfaces');
+  if (!showAll && _ifacesFiltered.length > pageSize) {
+    btn.style.display = 'block';
+    document.getElementById('ifacesTotalCount').textContent = _ifacesFiltered.length;
+  } else {
+    btn.style.display = 'none';
+  }
+}
+
+function showAllInterfaces() {
+  _ifacesShowAll = true;
+  renderInterfaceList();
 }
 
 async function loadInterfaces() {
@@ -848,15 +913,176 @@ async function loadInterfaces() {
   try {
     var data = await fetchJSON(API + '/interfaces');
     _allInterfaces = data.interfaces || [];
-    document.getElementById('filterIfaceName').value = '';
-    document.getElementById('filterIfaceType').value = '';
-    document.getElementById('filterIfaceState').value = '';
     filterInterfaces();
   } catch(e) {
     document.getElementById('interfacesContent').innerHTML = '<p style="color:#fca5a5">Error loading interfaces</p>';
   } finally {
     btn.disabled = false;
     btn.innerHTML = '🔄 Refresh';
+  }
+}
+
+// --- Diagnostics ---
+async function loadDiagnostics() {
+  var btn = document.getElementById('btnRefreshDiag');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span>';
+  try {
+    var data = await fetchJSON(API + '/diagnostics');
+    renderUsbDevices(data.usb_devices || []);
+    renderKernelModules(data.kernel_modules || []);
+    renderDiagWarnings(data.warnings || []);
+    renderRfkill(data.rfkill_output || '', data.has_rfkill);
+    renderLsusb(data.lsusb_output || '', data.has_lsusb);
+  } catch(e) {
+    document.getElementById('diagUsbContent').innerHTML = '<p style="color:#fca5a5">Error loading diagnostics</p>';
+    document.getElementById('diagModulesContent').innerHTML = '';
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '🔄 Refresh';
+  }
+}
+
+function renderUsbDevices(devices) {
+  var el = document.getElementById('diagUsbContent');
+  if (devices.length === 0) {
+    el.innerHTML = '<p style="color:#94a3b8;padding:12px">No USB WiFi adapters detected</p>';
+    return;
+  }
+  el.innerHTML = devices.map(function(d) {
+    var stateBadge = '';
+    switch (d.driver_state) {
+      case 'ready': stateBadge = badgeHtml('Ready', 'green'); break;
+      case 'bound_no_iface': stateBadge = badgeHtml('Driver loaded, no iface', 'yellow'); break;
+      case 'driver_available': stateBadge = badgeHtml('Driver available', 'yellow'); break;
+      default: stateBadge = badgeHtml('No driver', 'red'); break;
+    }
+    var hw = d.bus ? 'USB Bus ' + d.bus + ' Device ' + d.device : '';
+    return '<div style="background:#0f172a;border-radius:8px;padding:12px;margin-bottom:8px;border:1px solid #334155">' +
+      '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">' +
+      '<div><strong>' + escapeHtml(d.product_name) + '</strong>' +
+      '<div style="font-size:.75rem;color:#94a3b8">' + escapeHtml(d.vendor_name) + ' | ' + d.vendor_id + ':' + d.product_id + '</div></div>' +
+      stateBadge +
+      '</div>' +
+      '<div class="grid2">' +
+      stat('Driver', d.driver || '<span style="color:#fca5a5">none</span>') +
+      stat('Module', d.module || '-') +
+      stat('Interface', d.interface || '<span style="color:#94a3b8">none</span>') +
+      stat('Speed', d.speed || '-') +
+      '</div>' +
+      (d.driver_state !== 'ready' && d.module ? '<div style="margin-top:8px"><button class="btn btn-success btn-sm" style="padding:2px 12px;font-size:.75rem" onclick="loadModule(\'' + d.module + '\')">Load Module</button></div>' : '') +
+      '</div>';
+  }).join('');
+}
+
+function renderKernelModules(modules) {
+  _allKernelModules = modules;
+  filterKernelModules();
+}
+
+function filterKernelModules() {
+  var el = document.getElementById('diagModulesContent');
+  var filterVal = document.getElementById('filterModuleName').value.toLowerCase().trim();
+  var statusFilter = document.getElementById('filterModuleStatus').value;
+  var filtered = _allKernelModules.filter(function(m) {
+    if (filterVal && m.name.toLowerCase().indexOf(filterVal) === -1 && (!m.description || m.description.toLowerCase().indexOf(filterVal) === -1)) return false;
+    if (statusFilter === 'loaded' && !m.loaded) return false;
+    if (statusFilter === 'not_loaded' && m.loaded) return false;
+    return true;
+  });
+  if (_allKernelModules.length === 0) {
+    el.innerHTML = '<p style="color:#94a3b8;padding:12px">No WiFi-related kernel modules found</p>';
+    return;
+  }
+  if (filtered.length === 0) {
+    el.innerHTML = '<p style="color:#94a3b8;padding:12px">No matching kernel modules</p>';
+    return;
+  }
+  el.innerHTML = filtered.map(function(m) {
+    var status = m.loaded ? badgeHtml('Loaded', 'green') : badgeHtml('Not loaded', 'red');
+    var usedBy = (m.used_by && m.used_by.length > 0) ? m.used_by.join(', ') : '-';
+    var desc = m.description || '';
+    var btns = '';
+    if (!m.loaded) {
+      btns = '<button class="btn btn-success btn-sm" style="padding:2px 10px;font-size:.7rem;margin-left:4px" onclick="loadModule(\'' + m.name + '\')">Load</button>';
+    } else {
+      btns = '<button class="btn btn-danger btn-sm" style="padding:2px 10px;font-size:.7rem;margin-left:4px" onclick="unloadModule(\'' + m.name + '\')">Unload</button>';
+    }
+    return '<div style="background:#0f172a;border-radius:8px;padding:10px 12px;margin-bottom:6px;border:1px solid #334155">' +
+      '<div style="display:flex;justify-content:space-between;align-items:center">' +
+      '<div style="flex:1">' +
+      '<strong>' + m.name + '</strong> ' + status +
+      (desc ? '<div style="font-size:.75rem;color:#94a3b8;margin-top:2px">' + escapeHtml(desc) + '</div>' : '') +
+      '</div>' +
+      btns +
+      '</div>' +
+      '<div style="font-size:.75rem;color:#94a3b8;margin-top:4px">' +
+      'Size: ' + (m.size || '0') + ' | Used by: ' + usedBy +
+      '</div>' +
+      '</div>';
+  }).join('');
+}
+
+function renderDiagWarnings(warnings) {
+  var card = document.getElementById('diagWarningsCard');
+  var el = document.getElementById('diagWarningsContent');
+  if (!warnings || warnings.length === 0) {
+    card.style.display = 'none';
+    return;
+  }
+  card.style.display = 'block';
+  el.innerHTML = warnings.map(function(w) {
+    return '<div style="background:#422006;color:#fcd34d;padding:8px 12px;border-radius:6px;margin-bottom:4px;font-size:.85rem;border:1px solid #78350f">' + escapeHtml(w) + '</div>';
+  }).join('');
+}
+
+function renderRfkill(output, hasRfkill) {
+  var card = document.getElementById('diagRfkillCard');
+  if (!output && !hasRfkill) {
+    card.style.display = 'none';
+    return;
+  }
+  card.style.display = 'block';
+  document.getElementById('rfkillOutput').textContent = output || 'rfkill not available';
+}
+
+function renderLsusb(output, hasLsusb) {
+  var card = document.getElementById('diagLsusbCard');
+  if (!output && !hasLsusb) {
+    card.style.display = 'none';
+    return;
+  }
+  card.style.display = 'block';
+  document.getElementById('lsusbOutput').textContent = output || 'lsusb not available';
+}
+
+async function loadModule(name) {
+  if (!confirm('Load kernel module "' + name + '"?')) return;
+  try {
+    var data = await fetchJSON(API + '/diagnostics/modules/load', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({module: name})
+    });
+    showToast(data.message, data.ok);
+    if (data.ok) setTimeout(loadDiagnostics, 1000);
+  } catch(e) {
+    showToast('Failed to load module', false);
+  }
+}
+
+async function unloadModule(name) {
+  if (!confirm('Unload kernel module "' + name + '"?')) return;
+  try {
+    var data = await fetchJSON(API + '/diagnostics/modules/unload', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({module: name})
+    });
+    showToast(data.message, data.ok);
+    if (data.ok) setTimeout(loadDiagnostics, 1000);
+  } catch(e) {
+    showToast('Failed to unload module', false);
   }
 }
 

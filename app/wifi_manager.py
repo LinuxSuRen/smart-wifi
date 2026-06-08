@@ -1467,6 +1467,497 @@ def get_blacklist() -> list[str]:
         return []
 
 
+# ---------- USB WiFi Device Detection ----------
+
+@dataclass
+class USBWiFiDevice:
+    bus: str = ""
+    device: str = ""
+    vendor_id: str = ""
+    product_id: str = ""
+    vendor_name: str = ""
+    product_name: str = ""
+    driver: str = ""
+    module: str = ""
+    interface: str = ""
+    driver_state: str = "unknown"
+    speed: str = ""
+    sysfs_path: str = ""
+
+
+@dataclass
+class KernelWifiModule:
+    name: str = ""
+    loaded: bool = False
+    size: str = ""
+    used_by: list[str] = field(default_factory=list)
+    description: str = ""
+    license: str = ""
+    version: str = ""
+
+
+_WIFI_USB_VENDOR_DB = {
+    # (vendor_id, product_id): (driver, description)
+    # Realtek
+    "0bda": {"desc": "Realtek Semiconductor", "drivers": {
+        "8176": "rtl8192cu", "8178": "rtl8192cu", "8179": "rtl8188eu",
+        "818b": "rtl8192eu", "8197": "rtl8188eu", "8187": "rtl8187",
+        "8172": "rtl8192cu", "8171": "rtl8192cu", "8192": "rtl8192cu",
+        "b720": "rtl8723bu", "b812": "rtl88x2bu", "c811": "rtl8811cu",
+        "c820": "rtl8821cu", "c821": "rtl8822cu", "c82e": "rtl8821ce",
+        "8812": "rtl8812au", "881a": "rtl8821ae", "b822": "rtl8822bu",
+        "c812": "rtl8812cu", "c852": "rtl8852cu", "b83c": "rtl8852bu",
+    }},
+    # MediaTek / Ralink
+    "148f": {"desc": "Ralink/MediaTek", "drivers": {
+        "5370": "rt2800usb", "5372": "rt2800usb", "5572": "rt2800usb",
+        "7601": "mt7601u", "7610": "mt76x0u", "7612": "mt76x2u",
+        "7662": "mt7662u", "7615": "mt7615u", "7921": "mt7921u",
+    }},
+    # Qualcomm Atheros
+    "0cf3": {"desc": "Qualcomm Atheros", "drivers": {
+        "9271": "ath9k_htc", "7015": "ath9k_htc", "9374": "ath10k_usb",
+    }},
+    # Intel
+    "8086": {"desc": "Intel", "drivers": {
+        "08b1": "iwlmvm", "08b2": "iwlmvm",
+    }},
+}
+
+
+def _read_sysfs(path: str) -> str:
+    """Read a sysfs file, stripping whitespace."""
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except (OSError, PermissionError):
+        return ""
+
+
+def _symlink_target(path: str) -> str:
+    """Resolve a symlink and return the basename of the target."""
+    try:
+        if os.path.islink(path):
+            target = os.readlink(path)
+            return os.path.basename(target)
+    except (OSError, PermissionError):
+        pass
+    return ""
+
+
+def _usb_device_driver(dev_path: str) -> str:
+    """Find the driver bound to a USB device (or its interfaces)."""
+    # Check device-level driver (usually 'usb' for composite devices)
+    drv_path = os.path.join(dev_path, "driver")
+    driver = _symlink_target(drv_path)
+    if driver and driver != "usb":
+        return driver
+
+    # Check interface-level drivers
+    for entry in sorted(os.listdir(dev_path)):
+        if entry.startswith("usb") or entry.startswith("ep_"):
+            continue
+        iface_path = os.path.join(dev_path, entry)
+        if not os.path.isdir(iface_path):
+            continue
+        driver = _symlink_target(os.path.join(iface_path, "driver"))
+        if driver and driver != "usb":
+            return driver
+    return ""
+
+
+def _find_net_iface_for_usb(dev_path: str) -> str:
+    """Find the network interface associated with a USB WiFi device."""
+    # Walk device tree looking for net/ subdirectory
+    for root, dirs, _files in os.walk(dev_path, followlinks=False):
+        if "net" in dirs:
+            net_dir = os.path.join(root, "net")
+            try:
+                entries = os.listdir(net_dir)
+                if entries:
+                    return entries[0]
+            except (OSError, PermissionError):
+                pass
+    return ""
+
+
+def _lookup_usb_wifi_info(vendor_id: str, product_id: str) -> tuple[str, str]:
+    """Try to identify vendor/product name for a USB WiFi device."""
+    vendor_id_lower = vendor_id.lower()
+    vendor_info = _WIFI_USB_VENDOR_DB.get(vendor_id_lower)
+    if vendor_info:
+        vendor_name = vendor_info["desc"]
+        product_id_lower = product_id.lower()
+        driver = vendor_info["drivers"].get(product_id_lower, "")
+        product_name = f"WiFi Adapter ({product_id})"
+        return vendor_name, product_name, driver
+    return "", "", ""
+
+
+def _is_usb_bluetooth(dev_path: str) -> bool:
+    """Check if a USB device is a Bluetooth adapter by interface class."""
+    for entry in sorted(os.listdir(dev_path)):
+        if not entry.endswith(":1.0") and not entry.endswith(":1.1"):
+            continue
+        iface_path = os.path.join(dev_path, entry)
+        # Bluetooth: class e0 (Wireless), subclass 01 (Radio frequency), protocol 01 (Bluetooth)
+        cls = _read_sysfs(os.path.join(iface_path, "bInterfaceClass"))
+        sub = _read_sysfs(os.path.join(iface_path, "bInterfaceSubClass"))
+        if cls.lower() == "e0" and sub.lower() == "01":
+            return True
+    return False
+
+
+def _is_usb_hid(dev_path: str) -> bool:
+    """Check if a USB device is an HID (keyboard/mouse) device."""
+    for entry in sorted(os.listdir(dev_path)):
+        iface_path = os.path.join(dev_path, entry)
+        cls = _read_sysfs(os.path.join(iface_path, "bInterfaceClass"))
+        if cls.lower() == "03":
+            return True
+    return False
+
+
+_WIFI_KEYWORDS = [
+    "802.11", "wlan", "wifi",
+    "wireless lan", "wireless network",
+    "network adapter", "radio",
+]
+
+
+def _is_wifi_device(device_text: str) -> bool:
+    """Heuristic to determine if a USB device is a WiFi adapter."""
+    text_lower = device_text.lower()
+    return any(kw in text_lower for kw in _WIFI_KEYWORDS)
+
+
+def detect_usb_wifi_devices() -> list[USBWiFiDevice]:
+    """Detect USB WiFi adapters connected to the system.
+
+    Scans /sys/bus/usb/devices/* to find all USB WiFi adapters,
+    checks driver binding, kernel module, and associated network interface.
+    """
+    devices = []
+    usb_root = "/sys/bus/usb/devices"
+
+    if not os.path.isdir(usb_root):
+        return devices
+
+    try:
+        entries = sorted(os.listdir(usb_root))
+    except (OSError, PermissionError):
+        return devices
+
+    for entry in entries:
+        dev_path = os.path.join(usb_root, entry)
+        if not os.path.isdir(dev_path):
+            continue
+
+        vendor_id = _read_sysfs(os.path.join(dev_path, "idVendor"))
+        product_id = _read_sysfs(os.path.join(dev_path, "idProduct"))
+        if not vendor_id or not product_id:
+            # Try to read from the ep_00 interface
+            for sub in os.listdir(dev_path) if os.path.isdir(dev_path) else []:
+                sub_path = os.path.join(dev_path, sub)
+                if sub.endswith(":1.0"):
+                    vid = _read_sysfs(os.path.join(sub_path, "idVendor"))
+                    pid = _read_sysfs(os.path.join(sub_path, "idProduct"))
+                    if vid and pid:
+                        vendor_id, product_id = vid, pid
+                        break
+            if not vendor_id or not product_id:
+                continue
+
+        # Skip hubs and non-device entries
+        product_desc = (os.path.basename(_read_sysfs(os.path.join(dev_path, "product")))
+                        if os.path.exists(os.path.join(dev_path, "product")) else "")
+        manufacturer = (os.path.basename(_read_sysfs(os.path.join(dev_path, "manufacturer")))
+                        if os.path.exists(os.path.join(dev_path, "manufacturer")) else "")
+        combined_text = f"{manufacturer} {product_desc}"
+
+        vendor_name, product_name, known_driver = _lookup_usb_wifi_info(vendor_id, product_id)
+        if not vendor_name:
+            vendor_name = manufacturer
+
+        # Read USB product name from sysfs or usb.ids
+        if not product_name:
+            product_name = product_desc or f"USB {vendor_id}:{product_id}"
+
+        # Exclude Bluetooth and HID devices regardless of vendor
+        if _is_usb_bluetooth(dev_path) or _is_usb_hid(dev_path):
+            continue
+
+        # Check if this is a WiFi device by keywords or known vendor
+        is_wifi = _is_wifi_device(combined_text)
+        vendor_info = _WIFI_USB_VENDOR_DB.get(vendor_id.lower())
+
+        if not is_wifi and not vendor_info:
+            continue
+
+        driver = _usb_device_driver(dev_path)
+        module = ""
+        if driver:
+            module = _read_sysfs(os.path.join(dev_path, "driver", "module")) or driver
+            if module:
+                module = os.path.basename(module)
+
+        if not module and known_driver:
+            module = known_driver
+
+        net_iface = _find_net_iface_for_usb(dev_path)
+
+        speed = _read_sysfs(os.path.join(dev_path, "speed"))
+        if speed:
+            try:
+                speed_mbps = int(speed)
+                if speed_mbps >= 5000:
+                    speed = f"USB 3.0 ({speed_mbps} Mbps)"
+                elif speed_mbps >= 480:
+                    speed = f"USB 2.0 ({speed_mbps} Mbps)"
+                elif speed_mbps >= 12:
+                    speed = f"USB 1.1 ({speed_mbps} Mbps)"
+                else:
+                    speed = f"USB ({speed_mbps} Mbps)"
+            except ValueError:
+                pass
+
+        if net_iface and driver:
+            driver_state = "ready"
+        elif driver:
+            driver_state = "bound_no_iface"
+        elif module:
+            driver_state = "driver_available"
+        else:
+            driver_state = "unbound"
+
+        devices.append(USBWiFiDevice(
+            bus=_read_sysfs(os.path.join(dev_path, "busnum")),
+            device=_read_sysfs(os.path.join(dev_path, "devnum")),
+            vendor_id=vendor_id,
+            product_id=product_id,
+            vendor_name=vendor_name,
+            product_name=product_name,
+            driver=driver,
+            module=module or known_driver,
+            interface=net_iface,
+            driver_state=driver_state,
+            speed=speed,
+            sysfs_path=os.path.realpath(dev_path) if os.path.exists(dev_path) else dev_path,
+        ))
+
+    return devices
+
+
+# ---------- Kernel Module Management ----------
+
+_WIFI_MODULE_PATTERNS = [
+    "rtl", "ath", "iwl", "mt7", "brcm", "b43", "wl", "cfg80211",
+    "mac80211", "rt2x00", "rtlwifi", "rtl8", "rtw", "8821", "8822",
+    "8192", "8188", "8723", "8812", "8814", "8852", "mt76", "iwlmvm",
+    "iwlwifi", "bcmdhd", "bcmfmac",
+]
+
+
+def _is_wifi_module(name: str) -> bool:
+    """Check if a kernel module appears to be WiFi-related."""
+    name_lower = name.lower()
+    return any(p in name_lower for p in _WIFI_MODULE_PATTERNS)
+
+
+def detect_wifi_kernel_modules() -> list[KernelWifiModule]:
+    """Detect WiFi-related kernel modules and their loading status.
+
+    Parses /proc/modules and modinfo for each module.
+    """
+    modules = []
+    loaded_modules = {}
+
+    # Parse /proc/modules for loaded modules
+    try:
+        with open("/proc/modules") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 4:
+                    name = parts[0]
+                    size = parts[1]
+                    use_count = parts[2]
+                    used_by = [u.strip() for u in parts[3].split(",") if u.strip() and u.strip() != "-"]
+                    loaded_modules[name] = (size, used_by)
+    except (OSError, PermissionError):
+        pass
+
+    # Try to find all WiFi-related modules from sysfs
+    candidate_modules: set[str] = set()
+
+    # Check loaded modules
+    for name in loaded_modules:
+        if _is_wifi_module(name):
+            candidate_modules.add(name)
+
+    # Also check /lib/modules for WiFi-related modules not loaded
+    import glob as _glob
+    kernel_version = os.uname().release if hasattr(os, "uname") else ""
+    if kernel_version:
+        mod_dir = f"/lib/modules/{kernel_version}"
+    else:
+        try:
+            kernel_version = _run(["uname", "-r"])[1].strip()
+            mod_dir = f"/lib/modules/{kernel_version}"
+        except Exception:
+            mod_dir = "/lib/modules"
+
+    # Check for known WiFi module paths
+    wifi_module_paths = [
+        "kernel/drivers/net/wireless",
+        "kernel/drivers/net/wireless/realtek",
+        "kernel/drivers/net/wireless/mediatek",
+        "kernel/drivers/net/wireless/intel",
+        "kernel/drivers/net/wireless/ath",
+        "kernel/drivers/net/wireless/broadcom",
+        "kernel/drivers/staging/rtl*",
+    ]
+    for pattern in wifi_module_paths:
+        full_pattern = os.path.join(mod_dir, pattern)
+        try:
+            for mod_path in _glob.glob(full_pattern):
+                if os.path.isdir(mod_path):
+                    for root, _dirs, files in os.walk(mod_path):
+                        for f in files:
+                            if f.endswith(".ko") or f.endswith(".ko.xz") or f.endswith(".ko.zst"):
+                                mod_name = os.path.splitext(os.path.splitext(f)[0])[0] if f.endswith(".ko.xz") or f.endswith(".ko.zst") else os.path.splitext(f)[0]
+                                if _is_wifi_module(mod_name):
+                                    candidate_modules.add(mod_name)
+                elif mod_path.endswith(".ko") or mod_path.endswith(".ko.xz") or mod_path.endswith(".ko.zst"):
+                    mod_name = os.path.basename(mod_path)
+                    mod_name = os.path.splitext(os.path.splitext(mod_name)[0])[0] if mod_name.endswith(".ko.xz") or mod_name.endswith(".ko.zst") else os.path.splitext(mod_name)[0]
+                    if _is_wifi_module(mod_name):
+                        candidate_modules.add(mod_name)
+        except Exception:
+            pass
+
+    # Also check modules referenced by USB devices
+    usb_devices = detect_usb_wifi_devices()
+    for dev in usb_devices:
+        if dev.module:
+            candidate_modules.add(dev.module)
+
+    for mod_name in sorted(candidate_modules):
+        loaded = mod_name in loaded_modules
+        size_info = loaded_modules.get(mod_name, ("0", []))
+        size = size_info[0]
+        used_by = size_info[1]
+
+        description = ""
+        license_str = ""
+        version = ""
+        code, out, _ = _run(["modinfo", mod_name], timeout=5)
+        if code == 0:
+            for line in out.split("\n"):
+                line = line.strip()
+                if line.startswith("description:"):
+                    description = line.split(":", 1)[1].strip()
+                elif line.startswith("license:"):
+                    license_str = line.split(":", 1)[1].strip()
+                elif line.startswith("version:"):
+                    version = line.split(":", 1)[1].strip()
+                elif line.startswith("vermagic:"):
+                    pass
+
+        modules.append(KernelWifiModule(
+            name=mod_name,
+            loaded=loaded,
+            size=size,
+            used_by=used_by,
+            description=description,
+            license=license_str,
+            version=version,
+        ))
+
+    return modules
+
+
+def get_full_wifi_diagnostics() -> dict:
+    """Get comprehensive WiFi hardware diagnostics.
+
+    Returns a dict combining USB device info, kernel modules,
+    wireless radios, and interface status.
+    """
+    usb_devices = [asdict(d) for d in detect_usb_wifi_devices()]
+    kernel_modules = [asdict(m) for m in detect_wifi_kernel_modules()]
+    radio_info = detect_wireless_radios()
+    radio_info["radios"] = [asdict(r) for r in radio_info["radios"]]
+
+    import shutil as _shutil
+    has_lsusb = _shutil.which("lsusb") is not None
+    lsusb_output = ""
+    if has_lsusb:
+        _, lsusb_output, _ = _run(["lsusb"], timeout=5)
+
+    has_rfkill = _shutil.which("rfkill") is not None
+    rfkill_output = ""
+    if has_rfkill:
+        _, rfkill_output, _ = _run(["rfkill", "list"], timeout=5)
+
+    # Check if any USB WiFi devices are detected but no radio interfaces
+    warnings = []
+    if usb_devices and not radio_info["radios"]:
+        warnings.append("USB WiFi adapter(s) detected but no wireless interface visible. Kernel module may not be loaded.")
+    elif not usb_devices and not radio_info["radios"]:
+        warnings.append("No USB WiFi adapters or wireless interfaces detected.")
+
+    for dev in usb_devices:
+        if dev["driver_state"] == "unbound":
+            warnings.append(f"USB device {dev['vendor_id']}:{dev['product_id']} ({dev['product_name']}) has no driver bound. Try loading '{dev['module']}' module.")
+        elif dev["driver_state"] == "bound_no_iface":
+            warnings.append(f"USB device {dev['vendor_id']}:{dev['product_id']} ({dev['product_name']}) driver is loaded but no network interface found.")
+
+    return {
+        "usb_devices": usb_devices,
+        "kernel_modules": kernel_modules,
+        "wireless_radios": radio_info,
+        "lsusb_output": lsusb_output,
+        "rfkill_output": rfkill_output,
+        "warnings": warnings,
+        "has_lsusb": has_lsusb,
+        "has_rfkill": has_rfkill,
+    }
+
+
+def load_kernel_module(module_name: str) -> tuple[bool, str]:
+    """Load a kernel module using modprobe.
+
+    Returns (ok, message).
+    """
+    import shutil as _shutil
+    if not _shutil.which("modprobe"):
+        return False, "modprobe not available"
+
+    code, _, err = _run(["modprobe", module_name], timeout=15)
+    if code == 0:
+        return True, f"Module '{module_name}' loaded successfully"
+    return False, f"Failed to load '{module_name}': {err.strip() or 'unknown error'}"
+
+
+def unload_kernel_module(module_name: str) -> tuple[bool, str]:
+    """Unload a kernel module using modprobe -r.
+
+    Returns (ok, message).
+    """
+    import shutil as _shutil
+    if not _shutil.which("modprobe"):
+        return False, "modprobe not available"
+
+    # Don't allow unloading core WiFi subsystem modules
+    core_modules = {"cfg80211", "mac80211"}
+    if module_name in core_modules:
+        return False, f"Unloading '{module_name}' is not recommended (core WiFi subsystem)"
+
+    code, _, err = _run(["modprobe", "-r", module_name], timeout=15)
+    if code == 0:
+        return True, f"Module '{module_name}' unloaded successfully"
+    return False, f"Failed to unload '{module_name}': {err.strip() or 'unknown error (may be in use)'}"
+
+
 # ---------- Dependency management ----------
 
 REQUIRED_TOOLS = {
