@@ -67,6 +67,14 @@ Go to **Settings** tab → **Auto Start** section → click **Enable Auto Start*
 | `SECRET_KEY` | auto-generated | Flask session signing key |
 | `AUTH_PASSWORD` | — | Fallback password (bypasses PAM) |
 
+## Troubleshooting
+
+Plugged in a USB Wi-Fi adapter but `WIFI_INTERFACE` never shows up, or the
+hotspot fails to start? The [USB Wi-Fi adapter troubleshooting guide](docs/usb-wifi-troubleshooting.md)
+walks the full bring-up chain: Zero-CD (mass-storage) mode switching, driver
+binding (incl. why forcing `new_id` can crash the kernel), AP-capability
+checks, and a NetworkManager sanity check before using smart-wifi.
+
 ## Docker
 
 ```bash
